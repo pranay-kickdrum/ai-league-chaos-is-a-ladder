@@ -1,0 +1,114 @@
+/* Claim Verifier – content script popup styles */
+
+.cv-popup {
+  position: absolute;
+  z-index: 2147483647;
+  max-width: 420px;
+  min-width: 320px;
+  border-radius: 12px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.3), 0 0 0 1px rgba(255, 255, 255, 0.1);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  animation: cv-popup-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  overflow: hidden;
+  backdrop-filter: blur(10px);
+}
+
+@keyframes cv-popup-in {
+  from {
+    transform: translateY(-10px) scale(0.95);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0) scale(1);
+    opacity: 1;
+  }
+}
+
+.cv-popup__content {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 16px 18px;
+}
+
+.cv-popup__icon {
+  font-size: 24px;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.cv-popup__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.cv-popup__text {
+  color: #fff;
+  word-break: break-word;
+}
+
+.cv-popup__text strong {
+  font-weight: 700;
+  letter-spacing: 0.3px;
+}
+
+.cv-popup__close {
+  background: none;
+  border: none;
+  color: rgba(255, 255, 255, 0.7);
+  font-size: 22px;
+  cursor: pointer;
+  padding: 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+  transition: color 0.2s;
+}
+
+.cv-popup__close:hover {
+  color: #fff;
+}
+
+/* Verdict-based colours */
+.cv-popup--loading {
+  background: linear-gradient(135deg, rgba(71, 85, 105, 0.95), rgba(51, 65, 85, 0.95));
+}
+
+.cv-popup--TRUE {
+  background: linear-gradient(135deg, rgba(34, 197, 94, 0.95), rgba(22, 163, 74, 0.95));
+}
+
+.cv-popup--FALSE {
+  background: linear-gradient(135deg, rgba(239, 68, 68, 0.95), rgba(220, 38, 38, 0.95));
+}
+
+.cv-popup--MISLEADING {
+  background: linear-gradient(135deg, rgba(245, 158, 11, 0.95), rgba(217, 119, 6, 0.95));
+}
+
+.cv-popup--NOT_ENOUGH_EVIDENCE {
+  background: linear-gradient(135deg, rgba(99, 102, 241, 0.95), rgba(79, 70, 229, 0.95));
+}
+
+.cv-popup--error {
+  background: linear-gradient(135deg, rgba(190, 18, 60, 0.95), rgba(159, 18, 57, 0.95));
+}
+
+.cv-popup--info {
+  background: linear-gradient(135deg, rgba(59, 130, 246, 0.95), rgba(37, 99, 235, 0.95));
+}
+
+/* Pulsing animation for loading state */
+.cv-popup--loading .cv-popup__icon {
+  animation: cv-pulse 1.5s ease-in-out infinite;
+}
+
+@keyframes cv-pulse {
+  0%, 100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.5;
+  }
+}

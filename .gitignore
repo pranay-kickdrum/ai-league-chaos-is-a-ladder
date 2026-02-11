@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Environment variables
+.env
+.env.local
+
+# ChromaDB & Data
+data/chroma_db/
+week1/data/chroma_db/
+*.bin
+*.sqlite3
+
+# Datasets (too large for git)
+week1/data/liar_dataset/
+*.tsv
+*.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Logs
+*.log
+
+# Model cache
+.cache/
+models/
+
+# Temporary files
+tmp/
+temp/
+*.tmp

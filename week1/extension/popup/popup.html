@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claim Verifier</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <h1 class="header__title">Claim Verifier</h1>
+      <p class="header__subtitle">RAG-powered fact checking</p>
+    </header>
+
+    <!-- Manual input -->
+    <section class="input-section">
+      <textarea id="claimInput" rows="3" placeholder="Paste or type a claim to verify…"></textarea>
+      <button id="verifyBtn" class="btn btn--primary">Verify Claim</button>
+    </section>
+
+    <!-- Loading state -->
+    <section id="loadingSection" class="section hidden">
+      <div class="loader">
+        <div class="loader__spinner"></div>
+        <p class="loader__text">Verifying claim...</p>
+        <p class="loader__subtext" id="loaderSubtext">Searching knowledge base and web sources</p>
+      </div>
+    </section>
+
+    <!-- Result card -->
+    <section id="resultSection" class="section hidden">
+      <div id="verdictCard" class="verdict-card">
+        <div class="verdict-card__badge" id="verdictBadge">—</div>
+        <div class="verdict-card__confidence" id="verdictConfidence"></div>
+      </div>
+
+      <div class="detail-block">
+        <h3>Claim</h3>
+        <p id="resultClaim" class="detail-text"></p>
+      </div>
+
+      <div class="detail-block">
+        <h3>Reasoning</h3>
+        <p id="resultReasoning" class="detail-text"></p>
+      </div>
+
+      <!-- Sub-claims -->
+      <div class="detail-block" id="subClaimsBlock" style="display:none">
+        <h3>Sub-claims</h3>
+        <div id="subClaimsList"></div>
+      </div>
+
+      <!-- Citations -->
+      <div class="detail-block" id="citationsBlock" style="display:none">
+        <h3>Sources</h3>
+        <ul id="citationsList" class="citations-list"></ul>
+      </div>
+
+      <!-- Metadata -->
+      <div class="detail-block meta-block">
+        <span id="metaTime"></span>
+        <span id="metaSources"></span>
+      </div>
+    </section>
+
+    <!-- Error state -->
+    <section id="errorSection" class="section hidden">
+      <div class="error-box">
+        <p id="errorText"></p>
+      </div>
+    </section>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

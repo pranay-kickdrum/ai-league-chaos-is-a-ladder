@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claim Verifier – Web App</title>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --bg-input: #1e293b;
+      --text: #e2e8f0;
+      --text-dim: #94a3b8;
+      --accent: #6366f1;
+      --green: #22c55e;
+      --red: #ef4444;
+      --amber: #f59e0b;
+      --blue: #3b82f6;
+      --radius: 12px;
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      padding: 40px 20px;
+    }
+
+    .container {
+      width: 100%;
+      max-width: 640px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+
+    header h1 {
+      font-size: 28px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--accent), var(--blue));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    header p {
+      color: var(--text-dim);
+      margin-top: 4px;
+      font-size: 14px;
+    }
+
+    .input-group {
+      margin-bottom: 20px;
+    }
+
+    textarea {
+      width: 100%;
+      min-height: 100px;
+      padding: 14px 16px;
+      background: var(--bg-input);
+      border: 1px solid #334155;
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 15px;
+      font-family: inherit;
+      resize: vertical;
+      transition: border-color 0.2s;
+    }
+
+    textarea:focus {
+      outline: none;
+      border-color: var(--accent);
+    }
+
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 14px;
+      margin-top: 10px;
+      border: none;
+      border-radius: var(--radius);
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.1s, opacity 0.2s;
+      background: linear-gradient(135deg, var(--accent), var(--blue));
+      color: #fff;
+    }
+
+    .btn:hover { opacity: 0.92; }
+    .btn:active { transform: scale(0.98); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Loader */
+    .loader { text-align: center; padding: 32px 0; display: none; }
+    .loader.active { display: block; }
+
+    .spinner {
+      width: 40px; height: 40px;
+      margin: 0 auto 12px;
+      border: 4px solid #334155;
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    .loader p { color: var(--text-dim); font-size: 14px; }
+
+    /* Result */
+    .result { display: none; }
+    .result.active { display: block; }
+
+    .verdict-card {
+      text-align: center;
+      padding: 24px;
+      border-radius: var(--radius);
+      background: var(--bg-card);
+      margin-bottom: 16px;
+    }
+
+    .verdict-badge {
+      display: inline-block;
+      padding: 8px 28px;
+      border-radius: 24px;
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+    }
+
+    .verdict--TRUE .verdict-badge { background: rgba(34,197,94,0.15); color: var(--green); }
+    .verdict--FALSE .verdict-badge { background: rgba(239,68,68,0.15); color: var(--red); }
+    .verdict--MISLEADING .verdict-badge { background: rgba(245,158,11,0.15); color: var(--amber); }
+    .verdict--NOT_ENOUGH_EVIDENCE .verdict-badge { background: rgba(99,102,241,0.15); color: var(--accent); }
+
+    .confidence { margin-top: 8px; color: var(--text-dim); font-size: 13px; }
+
+    .card {
+      background: var(--bg-card);
+      border-radius: var(--radius);
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+
+    .card h3 {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      color: var(--text-dim);
+      margin-bottom: 8px;
+    }
+
+    .card p, .card ul { font-size: 14px; line-height: 1.6; }
+
+    .sub-claim {
+      padding: 8px 0;
+      border-bottom: 1px solid #334155;
+      font-size: 13px;
+    }
+
+    .sub-claim:last-child { border-bottom: none; }
+
+    .sub-claim strong { margin-right: 6px; }
+
+    .citation {
+      padding: 8px 0;
+      border-bottom: 1px solid #334155;
+      font-size: 13px;
+    }
+
+    .citation:last-child { border-bottom: none; }
+
+    .citation a { color: var(--blue); text-decoration: none; word-break: break-all; }
+    .citation a:hover { text-decoration: underline; }
+
+    .citation-quote {
+      display: block; margin-top: 4px;
+      color: var(--text-dim); font-style: italic; font-size: 12px;
+    }
+
+    .meta-row {
+      display: flex;
+      justify-content: space-between;
+      font-size: 12px;
+      color: var(--text-dim);
+      margin-top: 8px;
+    }
+
+    .error-box {
+      background: rgba(239,68,68,0.1);
+      border: 1px solid var(--red);
+      border-radius: var(--radius);
+      padding: 16px;
+      color: var(--red);
+      display: none;
+    }
+
+    .error-box.active { display: block; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Claim Verifier</h1>
+      <p>Real-time news claim verification powered by RAG</p>
+    </header>
+
+    <div class="input-group">
+      <textarea id="claimInput" placeholder="Paste a news headline, snippet, or claim to verify..."></textarea>
+      <button class="btn" id="verifyBtn">Verify Claim</button>
+    </div>
+
+    <div class="loader" id="loader">
+      <div class="spinner"></div>
+      <p>Analysing claim and retrieving evidence...</p>
+    </div>
+
+    <div class="error-box" id="errorBox"></div>
+
+    <div class="result" id="result">
+      <div class="verdict-card" id="verdictCard">
+        <div class="verdict-badge" id="verdictBadge">—</div>
+        <div class="confidence" id="confidenceText"></div>
+      </div>
+
+      <div class="card">
+        <h3>Claim</h3>
+        <p id="claimText"></p>
+      </div>
+
+      <div class="card">
+        <h3>Reasoning</h3>
+        <p id="reasoningText"></p>
+      </div>
+
+      <div class="card" id="subClaimsCard" style="display:none">
+        <h3>Sub-claims</h3>
+        <div id="subClaimsList"></div>
+      </div>
+
+      <div class="card" id="citationsCard" style="display:none">
+        <h3>Sources</h3>
+        <div id="citationsList"></div>
+      </div>
+
+      <div class="meta-row">
+        <span id="metaTime"></span>
+        <span id="metaSources"></span>
+        <span id="metaRounds"></span>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const API_URL = "http://localhost:8000/api/verify";
+
+    const claimInput = document.getElementById("claimInput");
+    const verifyBtn = document.getElementById("verifyBtn");
+    const loader = document.getElementById("loader");
+    const errorBox = document.getElementById("errorBox");
+    const resultDiv = document.getElementById("result");
+
+    function escapeHtml(s) {
+      const d = document.createElement("div");
+      d.textContent = s;
+      return d.innerHTML;
+    }
+
+    function reset() {
+      loader.classList.remove("active");
+      errorBox.classList.remove("active");
+      resultDiv.classList.remove("active");
+    }
+
+    async function verify() {
+      const text = claimInput.value.trim();
+      if (!text) return;
+
+      reset();
+      loader.classList.add("active");
+      verifyBtn.disabled = true;
+
+      try {
+        const resp = await fetch(API_URL, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text }),
+        });
+
+        if (!resp.ok) throw new Error(`Server returned ${resp.status}`);
+        const r = await resp.json();
+
+        loader.classList.remove("active");
+        resultDiv.classList.add("active");
+
+        const v = r.verdict || "UNKNOWN";
+        document.getElementById("verdictCard").className = `verdict-card verdict--${v}`;
+        document.getElementById("verdictBadge").textContent = v.replace(/_/g, " ");
+        document.getElementById("confidenceText").textContent =
+          `${Math.round((r.confidence || 0) * 100)}% confidence`;
+        document.getElementById("claimText").textContent = r.claim || "";
+        document.getElementById("reasoningText").textContent = r.reasoning || "";
+
+        // Sub-claims
+        const scCard = document.getElementById("subClaimsCard");
+        const scList = document.getElementById("subClaimsList");
+        if (r.sub_claims && r.sub_claims.length) {
+          scCard.style.display = "block";
+          scList.innerHTML = r.sub_claims.map(sc => `
+            <div class="sub-claim">
+              <strong>[${escapeHtml(sc.verdict)}]</strong> ${escapeHtml(sc.text)}
+            </div>
+          `).join("");
+        } else {
+          scCard.style.display = "none";
+        }
+
+        // Citations
+        const cCard = document.getElementById("citationsCard");
+        const cList = document.getElementById("citationsList");
+        if (r.citations && r.citations.length) {
+          cCard.style.display = "block";
+          cList.innerHTML = r.citations.map(c => `
+            <div class="citation">
+              <strong>${escapeHtml(c.source_name)}</strong>
+              (${Math.round((c.credibility_score || 0) * 100)}% cred.)
+              ${c.url ? `<br><a href="${escapeHtml(c.url)}" target="_blank">${escapeHtml(c.url)}</a>` : ""}
+              ${c.relevant_quote ? `<span class="citation-quote">"${escapeHtml(c.relevant_quote.substring(0, 250))}"</span>` : ""}
+            </div>
+          `).join("");
+        } else {
+          cCard.style.display = "none";
+        }
+
+        // Meta
+        const m = r.metadata || {};
+        document.getElementById("metaTime").textContent =
+          m.processing_time_ms ? `${(m.processing_time_ms / 1000).toFixed(1)}s` : "";
+        document.getElementById("metaSources").textContent =
+          m.sources_checked ? `${m.sources_checked} sources checked` : "";
+        document.getElementById("metaRounds").textContent =
+          m.retrieval_rounds ? `${m.retrieval_rounds} retrieval rounds` : "";
+
+      } catch (err) {
+        loader.classList.remove("active");
+        errorBox.textContent = `Verification failed: ${err.message}`;
+        errorBox.classList.add("active");
+      } finally {
+        verifyBtn.disabled = false;
+      }
+    }
+
+    verifyBtn.addEventListener("click", verify);
+    claimInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        verify();
+      }
+    });
+  </script>
+</body>
+</html>
