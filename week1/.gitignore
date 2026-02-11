@@ -31,5 +31,3 @@ data/eval_results.json
 .DS_Store
 Thumbs.db
 
-# Plan file (do not edit)
-*.plan.md
