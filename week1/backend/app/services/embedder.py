@@ -28,7 +28,7 @@ def _get_openai_client() -> OpenAI:
     return _openai_client
 
 
-def embed_texts(texts: list[str], batch_size: int = 100) -> list[list[float]]:
+def embed_texts(texts: list[str], batch_size: int = 500) -> list[list[float]]:
     """Embed a list of texts using OpenAI. Returns list of float vectors."""
     logger.info("=" * 60)
     logger.info("EMBEDDING GENERATION")

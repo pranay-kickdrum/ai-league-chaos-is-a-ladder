@@ -37,7 +37,11 @@ def chunk_text(
 
     chunks: list[str] = []
     start = 0
-    while start < len(text):
+    max_iterations = len(text) // (chunk_size - overlap) + 10  # Safety limit
+    iteration = 0
+    
+    while start < len(text) and iteration < max_iterations:
+        iteration += 1
         end = start + chunk_size
 
         # Try to break at a paragraph boundary
@@ -55,10 +59,16 @@ def chunk_text(
         if chunk:
             chunks.append(chunk)
 
-        start = start + break_pos - overlap
-        if start < 0:
-            start = 0
+        # Ensure we always make forward progress
+        next_start = start + max(break_pos - overlap, 1)
+        if next_start <= start:
+            # Force advance if we're stuck
+            next_start = start + chunk_size
+        start = next_start
 
+    if iteration >= max_iterations:
+        logger.warning("chunk_text hit iteration limit (%d) - text may be incompletely chunked", max_iterations)
+    
     return chunks
 
 
@@ -175,7 +185,7 @@ def load_wiki_articles(directory: str | Path) -> list[dict]:
 def ingest_documents(
     docs: list[dict],
     source_label: str = "generic",
-    batch_size: int = 100,
+    batch_size: int = 1000,
 ) -> int:
     """Chunk, embed, and insert *docs* into ChromaDB in batches.
 
@@ -218,14 +228,35 @@ def ingest_documents(
 
         for doc_idx_in_batch, doc in enumerate(batch_docs):
             global_doc_idx = batch_idx + doc_idx_in_batch
-            chunks = chunk_text(doc["text"])
             
-            for ci, chunk in enumerate(chunks):
-                doc_id = _doc_id(f"{source_label}:{global_doc_idx}", ci)
-                meta = {**doc.get("metadata", {}), "chunk_index": ci}
-                all_ids.append(doc_id)
-                all_texts.append(chunk)
-                all_metas.append(meta)
+            try:
+                # Log progress every 10 documents
+                if doc_idx_in_batch % 10 == 0:
+                    logger.debug("    Chunking document %d/%d in batch...", doc_idx_in_batch + 1, len(batch_docs))
+                
+                doc_text = doc.get("text", "")
+                if not doc_text or len(doc_text.strip()) == 0:
+                    logger.warning("    Skipping empty document at index %d", global_doc_idx)
+                    continue
+                
+                # Truncate extremely large documents (> 50k chars)
+                if len(doc_text) > 50000:
+                    logger.warning("    Truncating large document at index %d (length: %d)", global_doc_idx, len(doc_text))
+                    doc_text = doc_text[:50000]
+                
+                chunks = chunk_text(doc_text)
+                
+                for ci, chunk in enumerate(chunks):
+                    doc_id = _doc_id(f"{source_label}:{global_doc_idx}", ci)
+                    meta = {**doc.get("metadata", {}), "chunk_index": ci}
+                    all_ids.append(doc_id)
+                    all_texts.append(chunk)
+                    all_metas.append(meta)
+            
+            except Exception as exc:
+                logger.error("    ✗ Failed to chunk document %d: %s", global_doc_idx, exc)
+                logger.error("    Document text preview: %s", str(doc.get("text", ""))[:200])
+                continue
 
         if not all_texts:
             logger.warning("  No chunks generated from this batch, skipping")
