@@ -150,6 +150,71 @@ python -m http.server 8080
 
 ---
 
+## Keeping Data Fresh (Phase 2)
+
+Your knowledge base needs regular updates to stay current! Phase 2 implements automated data freshness:
+
+### Quick Test
+
+Test the update system:
+
+```bash
+cd week1
+python scripts/test_update_system.py
+```
+
+### Setup Automated Updates
+
+**Option A: Using Cron (Recommended for production)**
+
+```bash
+# Edit crontab.example with your path
+nano crontab.example
+
+# Install cron jobs
+crontab crontab.example
+
+# Verify
+crontab -l
+```
+
+**Default Schedule:**
+- **Daily (2 AM):** Fetch RSS news feeds + cleanup expired docs
+- **Weekly (Sunday 3 AM):** Update Wikipedia articles
+- **Daily (12 PM):** Health check
+
+**Option B: Using Built-in Scheduler**
+
+```bash
+# Run as long-lived process
+python scripts/run_scheduler.py
+```
+
+### Manual Updates
+
+```bash
+# Daily update (RSS feeds + cleanup)
+python scripts/update_kb_daily.py
+
+# Weekly update (Wikipedia)
+python scripts/update_kb_weekly.py
+
+# Health check
+python scripts/monitor_kb_health.py
+```
+
+### Configuration
+
+Edit `backend/app/config.py` to customize:
+- RSS feed sources
+- Wikipedia topics to monitor
+- TTL periods (how long data stays fresh)
+- Update frequencies
+
+**📖 Full Guide:** See [DATA_UPDATE_GUIDE.md](./DATA_UPDATE_GUIDE.md) for complete documentation.
+
+---
+
 ## Quick Demo
 
 Once everything is running, try verifying this claim:

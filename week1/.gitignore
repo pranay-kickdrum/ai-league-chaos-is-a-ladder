@@ -21,6 +21,10 @@ data/liar_dataset/
 data/wiki_articles/
 data/eval_results.json
 
+# Logs (Phase 2)
+logs/
+*.log
+
 # IDE
 .vscode/
 .idea/

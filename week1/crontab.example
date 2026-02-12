@@ -1,0 +1,53 @@
+# Production crontab configuration for knowledge base updates
+# Install with: crontab crontab.example
+# Or manually edit with: crontab -e
+
+# Path is configured for this machine
+PROJECT_PATH=/Users/pranay/Documents/projects/ai-league-chaos-is-a-ladder/week1
+PYTHON=$PROJECT_PATH/venv/bin/python
+
+# Create logs directory if it doesn't exist
+# mkdir -p $PROJECT_PATH/logs
+
+# ============================================================================
+# KNOWLEDGE BASE UPDATE SCHEDULE (Phase 2)
+# ============================================================================
+
+# Daily update: RSS feeds + cleanup (every day at 2:00 AM)
+0 2 * * * cd $PROJECT_PATH && $PYTHON scripts/update_kb_daily.py >> logs/daily_update.log 2>&1
+
+# Weekly update: Wikipedia articles (every Sunday at 3:00 AM)
+0 3 * * 0 cd $PROJECT_PATH && $PYTHON scripts/update_kb_weekly.py >> logs/weekly_update.log 2>&1
+
+# Health check: Monitor KB health (every day at 12:00 PM)
+0 12 * * * cd $PROJECT_PATH && $PYTHON scripts/monitor_kb_health.py >> logs/health_check.log 2>&1
+
+# Log rotation: Clean old logs (every Monday at 4:00 AM)
+# Keep last 30 days of logs
+0 4 * * 1 find $PROJECT_PATH/logs -name "*.log" -mtime +30 -delete
+
+# ============================================================================
+# ALTERNATIVE SCHEDULES (commented out - uncomment if needed)
+# ============================================================================
+
+# More frequent RSS updates (every 6 hours)
+# 0 */6 * * * cd $PROJECT_PATH && $PYTHON scripts/update_kb_daily.py >> logs/daily_update.log 2>&1
+
+# More frequent Wikipedia updates (every 3 days)
+# 0 3 */3 * * cd $PROJECT_PATH && $PYTHON scripts/update_kb_weekly.py >> logs/weekly_update.log 2>&1
+
+# ============================================================================
+# MONITORING AND ALERTS
+# ============================================================================
+
+# If you want email alerts on failures, install mailx and use:
+# 0 2 * * * cd $PROJECT_PATH && python scripts/update_kb_daily.py || echo "Daily update failed" | mail -s "KB Update Alert" your-email@example.com
+
+# ============================================================================
+# NOTES
+# ============================================================================
+# 1. Make sure scripts are executable: chmod +x scripts/*.py
+# 2. Create logs directory: mkdir -p logs
+# 3. Verify cron is running: service cron status (Linux) or check System Preferences (macOS)
+# 4. Test cron jobs manually first: cd $PROJECT_PATH && python scripts/update_kb_daily.py
+# 5. View cron logs: tail -f logs/daily_update.log

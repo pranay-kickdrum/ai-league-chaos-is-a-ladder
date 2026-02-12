@@ -13,6 +13,7 @@ import hashlib
 import json
 import logging
 import textwrap
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
@@ -124,6 +125,9 @@ def load_liar_dataset(tsv_path: str | Path) -> list[dict]:
                     "publish_date": "unknown",
                     "credibility_score": 0.85,
                     "label": label,
+                    "ingested_at": "unknown",  # Initial ingestion - set during ingest_documents
+                    "expires_at": "never",  # Fact-checks never expire
+                    "is_historical": True,  # LIAR dataset is historical
                 },
             })
     
@@ -169,6 +173,9 @@ def load_wiki_articles(directory: str | Path) -> list[dict]:
                     "category": "wiki",
                     "publish_date": "unknown",
                     "credibility_score": 0.90,
+                    "ingested_at": "unknown",  # Set during ingest_documents
+                    "expires_at": "unknown",  # Set during ingest_documents (90 days)
+                    "is_historical": False,
                 },
             })
         except Exception as exc:
@@ -200,9 +207,10 @@ def ingest_documents(
     if not docs:
         logger.warning("⚠ No documents to ingest")
         return 0
-    
+
     # Lazy imports to avoid circular dependency and allow CLI usage
     from app.services.embedder import embed_texts, add_documents
+    from app.config import settings
 
     logger.info("Total documents: %d", len(docs))
     logger.info("Processing in batches of %d documents", batch_size)
@@ -245,10 +253,27 @@ def ingest_documents(
                     doc_text = doc_text[:50000]
                 
                 chunks = chunk_text(doc_text)
-                
+
                 for ci, chunk in enumerate(chunks):
                     doc_id = _doc_id(f"{source_label}:{global_doc_idx}", ci)
                     meta = {**doc.get("metadata", {}), "chunk_index": ci}
+
+                    # Add/update timestamps if not already set
+                    if meta.get("ingested_at") == "unknown" or not meta.get("ingested_at"):
+                        meta["ingested_at"] = datetime.now().isoformat()
+
+                    # Set expiration based on category if not already set
+                    if meta.get("expires_at") == "unknown" or not meta.get("expires_at"):
+                        category = meta.get("category", "unknown")
+                        if category == "fact_check":
+                            meta["expires_at"] = "never"
+                        elif category == "wiki":
+                            meta["expires_at"] = (datetime.now() + timedelta(days=settings.ttl_wikipedia)).isoformat()
+                        elif category == "news":
+                            meta["expires_at"] = (datetime.now() + timedelta(days=settings.ttl_news_articles)).isoformat()
+                        else:
+                            meta["expires_at"] = (datetime.now() + timedelta(days=180)).isoformat()
+
                     all_ids.append(doc_id)
                     all_texts.append(chunk)
                     all_metas.append(meta)

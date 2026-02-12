@@ -1,0 +1,15 @@
+# TEST CRONTAB - Runs every minute for testing
+# Install with: crontab crontab.test
+# Remove with: crontab -r
+
+# IMPORTANT: Path is already set correctly for this machine
+PROJECT_PATH=/Users/pranay/Documents/projects/ai-league-chaos-is-a-ladder/week1
+
+# Test health check every minute (for 5 minutes of testing)
+# Using venv python to ensure all dependencies are available
+* * * * * cd $PROJECT_PATH && $PROJECT_PATH/venv/bin/python scripts/monitor_kb_health.py >> logs/cron_test.log 2>&1
+
+# After testing works (check logs/cron_test.log), remove this cron with:
+# crontab -r
+# Then install the real one:
+# crontab crontab.example
