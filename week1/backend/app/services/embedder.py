@@ -388,18 +388,52 @@ def store_verified_claim(
     logger.info("-" * 60)
 
 
-def lookup_cached_verdict(
+def _parse_cached_meta(meta: dict, similarity: float) -> dict:
+    """Parse ChromaDB metadata into a cache-hit dict."""
+    import json as _json
+    raw_urls = meta.get("citation_urls", "[]")
+    try:
+        citation_urls = _json.loads(raw_urls) if raw_urls else []
+    except (ValueError, TypeError):
+        citation_urls = []
+    return {
+        "verdict": meta.get("verdict", "NOT_ENOUGH_EVIDENCE"),
+        "confidence": float(meta.get("confidence", 0.0)),
+        "reasoning": meta.get("reasoning", ""),
+        "citation_urls": citation_urls,
+        "similarity": similarity,
+    }
+
+
+def lookup_cached_verdict_by_id(claim: str) -> Optional[dict]:
+    """Fast O(1) lookup by deterministic hash ID — no embedding needed.
+
+    Returns a cache-hit dict or None.
+    """
+    import hashlib
+    collection = get_collection()
+    claim_id = hashlib.sha256(f"verified_claim::{claim}".encode()).hexdigest()[:16]
+
+    try:
+        existing = collection.get(ids=[claim_id], include=["metadatas"])
+        if existing and existing.get("ids") and len(existing["ids"]) > 0:
+            meta = existing["metadatas"][0]
+            if meta.get("doc_type") == "verified_claim":
+                logger.info("  ✓ Cache HIT (exact ID match): verdict=%s", meta.get("verdict", "?"))
+                return _parse_cached_meta(meta, similarity=1.0)
+    except Exception:
+        pass
+    return None
+
+
+def lookup_cached_verdict_by_embedding(
     claim_embedding: list[float],
     similarity_threshold: float = 0.92,
 ) -> Optional[dict]:
-    """Check ChromaDB for a previously verified claim that closely matches.
+    """Embedding-based similarity lookup — slower, catches paraphrased claims.
 
-    If found with cosine similarity >= *similarity_threshold*, returns a dict:
-        {"verdict", "confidence", "reasoning", "citation_urls": [...]}
-    Otherwise returns None.
+    Returns a cache-hit dict or None.
     """
-    import json as _json
-
     collection = get_collection()
     if collection.count() == 0:
         return None
@@ -423,24 +457,11 @@ def lookup_cached_verdict(
         if similarity < similarity_threshold:
             continue
 
-        # Parse stored citation URLs
-        raw_urls = meta.get("citation_urls", "[]")
-        try:
-            citation_urls = _json.loads(raw_urls) if raw_urls else []
-        except (ValueError, TypeError):
-            citation_urls = []
-
         logger.info(
-            "  ✓ Cache HIT: similarity=%.3f, verdict=%s, %d citation URLs",
-            similarity, meta.get("verdict", "?"), len(citation_urls),
+            "  ✓ Cache HIT (embedding): similarity=%.3f, verdict=%s",
+            similarity, meta.get("verdict", "?"),
         )
-        return {
-            "verdict": meta.get("verdict", "NOT_ENOUGH_EVIDENCE"),
-            "confidence": float(meta.get("confidence", 0.0)),
-            "reasoning": meta.get("reasoning", ""),
-            "citation_urls": citation_urls,
-            "similarity": similarity,
-        }
+        return _parse_cached_meta(meta, similarity)
 
     logger.debug("  Cache MISS: no verified claim matched above %.2f threshold", similarity_threshold)
     return None

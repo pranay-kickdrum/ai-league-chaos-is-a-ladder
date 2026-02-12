@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -35,7 +36,7 @@ def _get_client() -> AsyncOpenAI:
 # Context assembly
 # ---------------------------------------------------------------------------
 
-MAX_EVIDENCE_FOR_LLM = 3       # send at most this many chunks
+MAX_EVIDENCE_FOR_LLM = 5       # send at most this many chunks
 MAX_CHUNK_CHARS = 400          # truncate each chunk to this length
 
 
@@ -44,13 +45,14 @@ def assemble_context(evidence: list[EvidenceChunk]) -> str:
 
     Keeps only the top-N most relevant chunks and truncates each to stay
     within a reasonable token budget so the LLM responds faster.
+    Includes relevance scores so the LLM can judge which evidence to trust.
     """
     top = evidence[:MAX_EVIDENCE_FOR_LLM]
     parts: list[str] = []
     for i, e in enumerate(top, 1):
         text = e.text[:MAX_CHUNK_CHARS] + ("..." if len(e.text) > MAX_CHUNK_CHARS else "")
         parts.append(
-            f"[Source {i}]: {text}\n"
+            f"[Source {i}] (relevance: {e.relevance_score:.2f}): {text}\n"
             f"  (from: {e.source_name}, date: {e.publish_date}, "
             f"url: {e.source_url}, credibility: {e.credibility_score:.2f})"
         )
@@ -64,6 +66,10 @@ def assemble_context(evidence: list[EvidenceChunk]) -> str:
 VERIFY_SYSTEM = """\
 Fact-checker. Given CLAIM + EVIDENCE, return a JSON verdict. Be concise.
 
+IMPORTANT: Some evidence may be IRRELEVANT to the claim (retrieved from a general database). \
+IGNORE any evidence that is not directly about the specific claim topic. \
+Each evidence has a "relevance" score (0-1). Evidence below 0.3 relevance is likely unrelated.
+
 VERDICTS: TRUE, FALSE, MISLEADING, NOT_ENOUGH_EVIDENCE (last resort only).
 Use partial evidence with lower confidence rather than NOT_ENOUGH_EVIDENCE.
 
@@ -71,7 +77,7 @@ JSON FORMAT (raw JSON, no markdown fences):
 {
   "sub_claims": [
     {"text": "sub-claim", "verdict": "TRUE|FALSE|MISLEADING|NOT_ENOUGH_EVIDENCE",
-     "support": [{"name": "Source", "url": "url-from-evidence", "summary": "1 sentence"}],
+     "support": [{"name": "Source", "url": "url", "summary": "1 sentence"}],
      "contradict": []}
   ],
   "verdict": "TRUE|FALSE|MISLEADING|NOT_ENOUGH_EVIDENCE",
@@ -82,12 +88,17 @@ JSON FORMAT (raw JSON, no markdown fences):
   ]
 }
 
-RULES:
-- NEVER fabricate URLs. Use ONLY exact urls from evidence "(url: ...)" fields.
-- NO DUPLICATE URLs across citations or sub-claim sources. Each URL appears ONCE.
-- Provide as many UNIQUE citations as possible (one per distinct source URL). Aim for 1-3.
+CITATION RULES:
+- Citations MUST be directly about the claim topic. NEVER cite unrelated evidence.
+- If an evidence source has a specific url, use it — but ONLY if the evidence is relevant.
+- If no relevant evidence has urls, provide full https:// URLs from your knowledge \
+  to authoritative pages ABOUT THIS SPECIFIC CLAIM (e.g. the Wikipedia page for the \
+  person/event/topic in the claim, or a news article about it).
+- ALWAYS use full URLs starting with https://. NEVER use plain text like "Wikipedia".
+- NO DUPLICATE URLs. Each URL appears ONCE.
+- Provide 1-3 UNIQUE, RELEVANT citations. Every citation MUST have a url.
+- "relevant_quote" must be from evidence that is ACTUALLY about the claim. Max 50 chars.
 - "reasoning" must be 2-3 sentences, not longer.
-- "relevant_quote" max 50 characters.
 - confidence: float 0.0-1.0."""
 
 
@@ -110,16 +121,17 @@ async def verify_claim(
 ) -> VerifyResponse:
     """Run the LLM verification reasoning and return a structured VerifyResponse."""
     used_count = min(len(evidence), MAX_EVIDENCE_FOR_LLM)
-    logger.info("Assembling context: %d/%d evidence chunks (capped), %d chars/chunk",
+    logger.info("  Assembling context: %d/%d evidence chunks, %d chars/chunk max",
                 used_count, len(evidence), MAX_CHUNK_CHARS)
     context = assemble_context(evidence)
-    logger.info("Context length: %d characters (~%d tokens)", len(context), len(context) // 4)
-    
+    logger.info("  Context → %d chars (~%d tokens)", len(context), len(context) // 4)
+
     client = _get_client()
 
     user_msg = f"CLAIM: {claim}\n\nEVIDENCE:\n{context}"
-    
-    logger.info("Calling LLM (%s) for verification", settings.fast_llm_model)
+
+    logger.info("  Calling %s …", settings.fast_llm_model)
+    t_llm = time.time()
     resp = await client.chat.completions.create(
         model=settings.fast_llm_model,
         messages=[
@@ -129,9 +141,10 @@ async def verify_claim(
         temperature=0.0,
         max_tokens=512,
     )
+    llm_ms = (time.time() - t_llm) * 1000
 
     raw = resp.choices[0].message.content.strip()
-    logger.debug("LLM response length: %d characters", len(raw))
+    logger.info("  LLM responded in %.0fms (%d chars)", llm_ms, len(raw))
 
     # Strip markdown code fences if present
     if raw.startswith("```"):
@@ -140,13 +153,17 @@ async def verify_claim(
         raw = raw.rsplit("```", 1)[0]
     raw = raw.strip()
 
+    # Log raw JSON response for debugging
+    logger.info("  Raw LLM JSON:")
+    for line in raw.split("\n"):
+        logger.info("    │ %s", line)
+
     try:
         parsed = json.loads(raw)
         llm_out = LLMVerificationOutput(**parsed)
-        logger.info("✓ LLM response parsed successfully")
+        logger.info("  ✓ Parsed successfully")
     except (json.JSONDecodeError, Exception) as exc:
-        logger.error("Failed to parse LLM output: %s", exc)
-        logger.debug("Raw LLM output: %s", raw[:500])
+        logger.error("  ✗ Failed to parse LLM output: %s", exc)
         return VerifyResponse(
             claim=claim,
             verdict=Verdict.NOT_ENOUGH_EVIDENCE,
@@ -163,10 +180,6 @@ async def verify_claim(
         "NOT_ENOUGH_EVIDENCE": Verdict.NOT_ENOUGH_EVIDENCE,
     }
     verdict = verdict_map.get(llm_out.verdict.upper(), Verdict.NOT_ENOUGH_EVIDENCE)
-
-    logger.info("LLM verdict: %s (raw: '%s')", verdict.value, llm_out.verdict)
-    logger.info("LLM confidence: %.2f", llm_out.confidence)
-    logger.info("LLM produced %d sub-claims and %d citations", len(llm_out.sub_claims), len(llm_out.citations))
 
     # Build sub-claim results with structured sources
     sub_results: list[SubClaimResult] = []

@@ -15,7 +15,7 @@ from app.services.reasoner import (
     reformulate_query,
     verify_claim,
 )
-from app.services.embedder import embed_texts, lookup_cached_verdict, store_verified_claim
+from app.services.embedder import embed_texts, store_verified_claim
 from app.services.reranker import rerank
 from app.services.retriever import batch_hybrid_retrieve, hybrid_retrieve
 from app.services.web_search import web_search
@@ -104,22 +104,28 @@ async def run_verification_pipeline(
     pipeline_start = time.time()
     step_times: dict[str, float] = {}
 
-    logger.info("=" * 80)
-    logger.info("VERIFICATION PIPELINE STARTED")
-    logger.info("=" * 80)
-    logger.info("INPUT: %s", raw_text[:200] + ("..." if len(raw_text) > 200 else ""))
-    
-    # 1+2. Extract and decompose in ONE LLM call
-    logger.info("\n[STEP 1/6] CLAIM EXTRACTION + DECOMPOSITION")
-    logger.info("-" * 80)
+    logger.info("")
+    logger.info("╔" + "═" * 78 + "╗")
+    logger.info("║  VERIFICATION PIPELINE STARTED" + " " * 47 + "║")
+    logger.info("╚" + "═" * 78 + "╝")
+    logger.info("")
+    logger.info("  Input (%d chars): %s", len(raw_text),
+                raw_text[:200] + ("..." if len(raw_text) > 200 else ""))
+    logger.info("")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  STEP 1 — CLAIM EXTRACTION + DECOMPOSITION
+    # ──────────────────────────────────────────────────────────────────────
+    logger.info("┌─────────────────────────────────────────────────────────────────┐")
+    logger.info("│  STEP 1/6 ▸ CLAIM EXTRACTION + DECOMPOSITION                  │")
+    logger.info("└─────────────────────────────────────────────────────────────────┘")
+    logger.info("")
     t0 = time.time()
     claim, sub_claims = await extract_and_decompose(raw_text)
     step_times["1_extract_decompose"] = time.time() - t0
-    logger.info("EXTRACTED CLAIM: %s", claim)
-    logger.info("⏱ Step 1 took: %s", _elapsed(t0))
-    
+
     if claim == "NO_CLAIM" or not claim:
-        logger.warning("No verifiable claim found in input text")
+        logger.warning("  ✗ No verifiable claim found in input text")
         return VerifyResponse(
             claim=raw_text,
             verdict=Verdict.NOT_ENOUGH_EVIDENCE,
@@ -128,179 +134,139 @@ async def run_verification_pipeline(
             metadata={"extraction_result": "NO_CLAIM"},
         )
 
-    logger.info("DECOMPOSED INTO %d SUB-CLAIMS:", len(sub_claims))
+    logger.info("  ✓ Extracted claim : %s", claim)
+    logger.info("  ✓ Sub-claims (%d) :", len(sub_claims))
     for i, sc in enumerate(sub_claims, 1):
-        logger.info("  [%d] %s", i, sc)
+        logger.info("      %d. %s", i, sc)
+    logger.info("")
+    logger.info("  ⏱  %s", _elapsed(t0))
+    logger.info("")
 
-    # 1b. Cache check – look for previously verified identical claim
-    logger.info("\n[STEP 1b] CACHE CHECK – looking for cached verdict in ChromaDB")
-    logger.info("-" * 80)
-    t_cache = time.time()
-    claim_emb = embed_texts([claim])[0]
-    cached = lookup_cached_verdict(claim_emb)
-    step_times["1b_cache_check"] = time.time() - t_cache
-    logger.info("⏱ Cache check took: %s", _elapsed(t_cache))
-
-    if cached:
-        logger.info("=" * 80)
-        logger.info("CACHE HIT – Returning stored verdict (similarity=%.3f)", cached["similarity"])
-        logger.info("=" * 80)
-
-        from app.models import Citation, SubClaimResult, SubClaimSource
-
-        # Build citations from cached URLs
-        cached_citations = [
-            Citation(
-                source_name=cu.get("source_name", "Cached Source"),
-                url=cu.get("url", ""),
-                relevant_quote="",
-            )
-            for cu in cached["citation_urls"]
-            if cu.get("url")
-        ]
-
-        # Build minimal sub-claim results with the same cached citations as sources
-        cached_sc_sources = [
-            SubClaimSource(name=cu.get("source_name", ""), url=cu.get("url", ""))
-            for cu in cached["citation_urls"]
-            if cu.get("url")
-        ]
-        cached_sub_claims = [
-            SubClaimResult(
-                text=sc,
-                verdict=Verdict(cached["verdict"]),
-                evidence_summary="Retrieved from cached verification.",
-                supporting_sources=list(cached_sc_sources),
-            )
-            for sc in sub_claims
-        ]
-
-        total_elapsed = time.time() - pipeline_start
-        return VerifyResponse(
-            claim=claim,
-            verdict=Verdict(cached["verdict"]),
-            confidence=cached["confidence"],
-            reasoning=cached["reasoning"],
-            sub_claims=cached_sub_claims,
-            citations=cached_citations,
-            metadata={
-                "cache_hit": True,
-                "cache_similarity": cached["similarity"],
-                "timing": {k: f"{v*1000:.0f}ms" for k, v in step_times.items()},
-                "total_time": f"{total_elapsed*1000:.0f}ms",
-            },
-        )
-    else:
-        logger.info("  Cache MISS – proceeding with full pipeline")
-
-    # 2. Retrieve evidence for each sub-claim (batched)
-    logger.info("\n[STEP 2/6] EVIDENCE RETRIEVAL (KB-FIRST, WEB IF NEEDED)")
-    logger.info("-" * 80)
+    # ──────────────────────────────────────────────────────────────────────
+    #  STEP 2 — EVIDENCE RETRIEVAL
+    # ──────────────────────────────────────────────────────────────────────
+    logger.info("┌─────────────────────────────────────────────────────────────────┐")
+    logger.info("│  STEP 2/6 ▸ EVIDENCE RETRIEVAL (KB → Rerank → Web if needed)   │")
+    logger.info("└─────────────────────────────────────────────────────────────────┘")
+    logger.info("")
     t0 = time.time()
     all_evidence: list[EvidenceChunk] = []
     total_rounds = 0
     any_used_web = False
 
-    # --- 2a. Batch-embed all sub-claims in ONE OpenAI call ---
-    #     If a sub-claim equals the claim itself, reuse the embedding from cache check
+    # 2a. Batch-embed
     t_emb = time.time()
-    if len(sub_claims) == 1 and sub_claims[0] == claim:
-        logger.info("Single sub-claim equals claim – reusing cache-check embedding")
-        sub_claim_embeddings = [claim_emb]
-    else:
-        logger.info("Batch-embedding %d sub-claim(s) in a single API call...", len(sub_claims))
-        sub_claim_embeddings = embed_texts(sub_claims)
-    logger.info("  ✓ Batch embedding done [%s]", _elapsed(t_emb))
+    sub_claim_embeddings = embed_texts(sub_claims)
+    logger.info("  [2a] Batch-embedded %d sub-claim(s)  ⏱ %s", len(sub_claims), _elapsed(t_emb))
 
-    # --- 2b. Batch KB retrieval: ONE ChromaDB call + per-query BM25 + RRF ---
+    # 2b. Batch KB retrieval
     t_kb = time.time()
-    logger.info("Batch KB retrieval for %d sub-claim(s)...", len(sub_claims))
-    kb_results_per_sc = await batch_hybrid_retrieve(
-        sub_claims, sub_claim_embeddings,
-    )
-    logger.info("  ✓ Batch KB retrieval done [%s]", _elapsed(t_kb))
+    kb_results_per_sc = await batch_hybrid_retrieve(sub_claims, sub_claim_embeddings)
+    logger.info("  [2b] Batch KB retrieval done          ⏱ %s", _elapsed(t_kb))
 
-    # --- 2c. Per sub-claim: rerank KB evidence, check sufficiency ---
-    #     If KB insufficient → fire web search follow-up (in parallel)
+    # 2c. Rerank + sufficiency per sub-claim
     followup_tasks: list[tuple[int, asyncio.Task]] = []
     per_sc_evidence: list[list[EvidenceChunk]] = [[] for _ in sub_claims]
     per_sc_rounds: list[int] = [1] * len(sub_claims)
     per_sc_web: list[bool] = [False] * len(sub_claims)
 
+    logger.info("")
+    logger.info("  [2c] Per sub-claim rerank + sufficiency check:")
     for i, (sc, kb_evidence) in enumerate(zip(sub_claims, kb_results_per_sc)):
-        logger.info("  Sub-claim %d: KB returned %d chunks", i + 1, len(kb_evidence))
+        logger.info("       ┌ Sub-claim %d: \"%s\"", i + 1, sc[:80])
+        logger.info("       │  KB chunks returned: %d", len(kb_evidence))
 
         if not kb_evidence:
-            logger.info("    → No KB evidence, scheduling web follow-up")
+            logger.info("       │  → No KB evidence → scheduling web follow-up")
+            logger.info("       └")
             seen: set[str] = set()
-            task = asyncio.create_task(
-                _followup_retrieval(sc, [], seen)
-            )
+            task = asyncio.create_task(_followup_retrieval(sc, [], seen))
             followup_tasks.append((i, task))
             continue
 
-        # Rerank KB evidence
         t_rr = time.time()
         reranked = await rerank(sc, kb_evidence)
         top_score = reranked[0].relevance_score if reranked else 0.0
-        logger.info("    Rerank: top_score=%.3f, %d chunks [%s]",
-                    top_score, len(reranked), _elapsed(t_rr))
+        logger.info("       │  Rerank: %d chunks, top_score=%.3f  ⏱ %s",
+                     len(reranked), top_score, _elapsed(t_rr))
 
         kb_sufficient = top_score > 0.5 and len(reranked) >= 2
         if kb_sufficient:
-            logger.info("    ✓ KB sufficient – skipping web")
+            logger.info("       │  ✓ KB sufficient — skipping web")
             per_sc_evidence[i] = reranked
         else:
-            logger.info("    ✗ KB insufficient – scheduling web follow-up")
+            logger.info("       │  ✗ KB insufficient (score=%.3f) — scheduling web", top_score)
             seen = {e.text[:200] for e in reranked}
-            task = asyncio.create_task(
-                _followup_retrieval(sc, list(reranked), seen)
-            )
+            task = asyncio.create_task(_followup_retrieval(sc, list(reranked), seen))
             followup_tasks.append((i, task))
+        logger.info("       └")
 
-    # --- 2d. Await all web follow-ups in parallel ---
+    # 2d. Await web follow-ups
     if followup_tasks:
-        logger.info("  Awaiting %d web follow-up(s) in parallel...", len(followup_tasks))
+        logger.info("")
+        logger.info("  [2d] Awaiting %d web follow-up(s) in parallel…", len(followup_tasks))
         task_results = await asyncio.gather(*(t for _, t in followup_tasks))
         for (idx, _), (evidence, extra_rounds, used_web) in zip(followup_tasks, task_results):
             per_sc_evidence[idx] = evidence
             per_sc_rounds[idx] += extra_rounds
             per_sc_web[idx] = used_web
 
-    # --- 2e. Aggregate ---
+    # 2e. Aggregate
+    logger.info("")
+    logger.info("  [2e] Aggregated evidence per sub-claim:")
     for i, (evidence, rounds, used_web) in enumerate(
         zip(per_sc_evidence, per_sc_rounds, per_sc_web)
     ):
-        source_type = "KB+Web" if used_web else "KB only"
-        logger.info("Sub-claim %d: %d chunks, %d round(s) (%s)",
-                    i + 1, len(evidence), rounds, source_type)
+        src = "KB+Web" if used_web else "KB"
+        logger.info("       Sub-claim %d: %d chunks, %d round(s) [%s]",
+                     i + 1, len(evidence), rounds, src)
+        for j, e in enumerate(evidence, 1):
+            logger.info("         %d. [rel=%.3f | cred=%.2f | %s] %s",
+                         j, e.relevance_score, e.credibility_score,
+                         e.retrieval_method[:3].upper(), e.source_name[:35])
+            logger.info("            \"%s\"", e.text[:100].replace("\n", " "))
+            if e.source_url:
+                logger.info("            url: %s", e.source_url[:100])
         all_evidence.extend(evidence)
         total_rounds += rounds
         if used_web:
             any_used_web = True
 
     step_times["2_evidence_retrieval"] = time.time() - t0
-    logger.info("⏱ Step 2 took: %s", _elapsed(t0))
+    logger.info("")
+    logger.info("  ⏱  %s", _elapsed(t0))
+    logger.info("")
 
-    # De-duplicate evidence (by first 200 chars of text)
+    # De-duplicate + filter system entries
     seen: set[str] = set()
     unique_evidence: list[EvidenceChunk] = []
+    system_filtered = 0
     for e in all_evidence:
+        if e.source_name == "Verified Claim (System)":
+            system_filtered += 1
+            continue
         key = e.text[:200]
         if key not in seen:
             seen.add(key)
             unique_evidence.append(e)
 
-    logger.info("\n[STEP 3/6] EVIDENCE CONSOLIDATION + WEB CITATION ENRICHMENT")
-    logger.info("-" * 80)
+    # ──────────────────────────────────────────────────────────────────────
+    #  STEP 3 — EVIDENCE CONSOLIDATION
+    # ──────────────────────────────────────────────────────────────────────
+    logger.info("┌─────────────────────────────────────────────────────────────────┐")
+    logger.info("│  STEP 3/6 ▸ EVIDENCE CONSOLIDATION                             │")
+    logger.info("└─────────────────────────────────────────────────────────────────┘")
+    logger.info("")
     t0 = time.time()
-    logger.info("Total evidence chunks: %d (before dedup)", len(all_evidence))
-    logger.info("Unique evidence chunks: %d (after dedup)", len(unique_evidence))
-    logger.info("Total retrieval rounds: %d", total_rounds)
+    logger.info("  Raw chunks collected   : %d", len(all_evidence))
+    logger.info("  System entries filtered : %d", system_filtered)
+    logger.info("  Unique after dedup     : %d", len(unique_evidence))
+    logger.info("  Retrieval rounds total : %d", total_rounds)
 
-    # FALLBACK: If sub-claims yielded very little evidence, try the original broad claim
+    # Fallback if low evidence
     if len(unique_evidence) < 3:
-        logger.info("[STEP 3b] FALLBACK - Searching with original claim (low evidence: %d chunks)", len(unique_evidence))
+        logger.info("")
+        logger.info("  ⚠  Low evidence (%d) — running fallback search with original claim", len(unique_evidence))
         fb_kb = await hybrid_retrieve(claim)
         new_from_fallback = 0
         for e in fb_kb:
@@ -319,41 +285,133 @@ async def run_verification_pipeline(
                     seen.add(key)
                     unique_evidence.append(e)
                     new_from_fallback += 1
-        
-        logger.info("  Fallback search found %d new evidence chunks (total now: %d)",
-                    new_from_fallback, len(unique_evidence))
-        
+
+        logger.info("  Fallback added         : %d new chunks (total now: %d)",
+                     new_from_fallback, len(unique_evidence))
+
         if new_from_fallback > 0 and len(unique_evidence) > settings.rerank_top_k:
             unique_evidence = await rerank(claim, unique_evidence)
-            logger.info("  Re-ranked expanded evidence to top-%d", len(unique_evidence))
+
+    # Sort by relevance
+    unique_evidence.sort(key=lambda e: e.relevance_score, reverse=True)
 
     kb_count = sum(1 for e in unique_evidence if e.retrieval_method == "knowledge_base")
     web_count = sum(1 for e in unique_evidence if e.retrieval_method == "web_search")
-    logger.info("Evidence sources: %d from KB, %d from Web", kb_count, web_count)
-    step_times["3_consolidation"] = time.time() - t0
-    logger.info("⏱ Step 3 took: %s", _elapsed(t0))
+    logger.info("")
+    logger.info("  Evidence breakdown     : %d KB  |  %d Web", kb_count, web_count)
 
-    # 4. LLM reasoning
-    logger.info("\n[STEP 4/6] LLM REASONING & VERIFICATION")
-    logger.info("-" * 80)
+    if unique_evidence:
+        logger.info("")
+        logger.info("  Top evidence chunks (sorted by relevance):")
+        for j, e in enumerate(unique_evidence[:5], 1):
+            logger.info("    %d. [rel=%.3f | cred=%.2f | %s] %s",
+                         j, e.relevance_score, e.credibility_score,
+                         e.retrieval_method[:3].upper(),
+                         e.source_name[:40])
+            logger.info("       text: \"%s\"", e.text[:120].replace("\n", " "))
+            if e.source_url:
+                logger.info("       url : %s", e.source_url[:100])
+
+    step_times["3_consolidation"] = time.time() - t0
+    logger.info("")
+    logger.info("  ⏱  %s", _elapsed(t0))
+    logger.info("")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  STEP 4 — LLM REASONING & VERIFICATION
+    # ──────────────────────────────────────────────────────────────────────
+    logger.info("┌─────────────────────────────────────────────────────────────────┐")
+    logger.info("│  STEP 4/6 ▸ LLM REASONING & VERIFICATION                      │")
+    logger.info("└─────────────────────────────────────────────────────────────────┘")
+    logger.info("")
     t0 = time.time()
-    logger.info("Passing %d evidence chunks to LLM for analysis", len(unique_evidence))
+    logger.info("  Input → LLM:")
+    logger.info("    Claim       : %s", claim[:120])
+    logger.info("    Sub-claims  : %d", len(sub_claims))
+    logger.info("    Evidence    : %d chunks (top-5 sent to LLM)", len(unique_evidence))
+    logger.info("")
+
     result = await verify_claim(claim, sub_claims, unique_evidence)
     step_times["4_llm_reasoning"] = time.time() - t0
-    logger.info("LLM VERDICT: %s (confidence: %.2f)", result.verdict.value, result.confidence)
-    logger.info("⏱ Step 4 took: %s", _elapsed(t0))
 
-    # 5. Citation validation
-    logger.info("\n[STEP 5/6] CITATION VALIDATION")
-    logger.info("-" * 80)
+    logger.info("  Output ← LLM:")
+    logger.info("    Verdict     : %s", result.verdict.value)
+    logger.info("    Confidence  : %.2f", result.confidence)
+    logger.info("    Reasoning   : %s", result.reasoning[:200])
+    logger.info("    Sub-claims  : %d", len(result.sub_claims))
+    for j, sc_res in enumerate(result.sub_claims, 1):
+        logger.info("      %d. [%s] %s", j, sc_res.verdict.value, sc_res.text[:80])
+        for s in sc_res.supporting_sources[:2]:
+            logger.info("         + %s  url=%s", s.name[:40], (s.url or "—")[:60])
+        for s in sc_res.contradicting_sources[:2]:
+            logger.info("         − %s  url=%s", s.name[:40], (s.url or "—")[:60])
+    logger.info("    Citations   : %d", len(result.citations))
+    for j, c in enumerate(result.citations, 1):
+        logger.info("      %d. %s  url=%s", j, c.source_name[:40], (c.url or "—")[:60])
+        logger.info("         quote: \"%s\"", (c.relevant_quote or "")[:80])
+    logger.info("")
+    logger.info("  ⏱  %s", _elapsed(t0))
+    logger.info("")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  STEP 4b — RETRY WITH WEB (if NOT_ENOUGH_EVIDENCE & no web yet)
+    # ──────────────────────────────────────────────────────────────────────
+    if result.verdict == Verdict.NOT_ENOUGH_EVIDENCE and not any_used_web:
+        logger.info("┌─────────────────────────────────────────────────────────────────┐")
+        logger.info("│  STEP 4b ▸ RETRY — web search (KB was insufficient)            │")
+        logger.info("└─────────────────────────────────────────────────────────────────┘")
+        logger.info("")
+        t0 = time.time()
+        web_evidence = await web_search(claim)
+        web_only: list[EvidenceChunk] = []
+        for e in web_evidence:
+            key = e.text[:200]
+            if key not in seen:
+                seen.add(key)
+                web_only.append(e)
+                unique_evidence.append(e)
+        any_used_web = True
+        logger.info("  Web search returned %d new chunks", len(web_only))
+
+        if web_only:
+            logger.info("  Re-running LLM with %d web-only chunks…", len(web_only))
+            result = await verify_claim(claim, sub_claims, web_only)
+            logger.info("")
+            logger.info("  Retry output:")
+            logger.info("    Verdict     : %s", result.verdict.value)
+            logger.info("    Confidence  : %.2f", result.confidence)
+            logger.info("    Reasoning   : %s", result.reasoning[:200])
+
+        step_times["4b_web_retry"] = time.time() - t0
+        logger.info("")
+        logger.info("  ⏱  %s", _elapsed(t0))
+        logger.info("")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  STEP 5 — CITATION VALIDATION
+    # ──────────────────────────────────────────────────────────────────────
+    logger.info("┌─────────────────────────────────────────────────────────────────┐")
+    logger.info("│  STEP 5/6 ▸ CITATION VALIDATION                                │")
+    logger.info("└─────────────────────────────────────────────────────────────────┘")
+    logger.info("")
     t0 = time.time()
-    logger.info("Validating %d citations from LLM", len(result.citations))
+    logger.info("  Input : %d LLM citations, %d evidence chunks to match against",
+                 len(result.citations), len(unique_evidence))
     result = await validate_citations(result, unique_evidence)
     step_times["5_citation_validation"] = time.time() - t0
-    logger.info("Validated citations: %d survived validation", len(result.citations))
-    logger.info("⏱ Step 5 took: %s", _elapsed(t0))
 
-    # 6. Enrich metadata
+    logger.info("  Output: %d citations survived validation", len(result.citations))
+    for j, c in enumerate(result.citations, 1):
+        logger.info("    %d. %s (%.0f%% cred.)  url=%s",
+                     j, c.source_name[:40], c.credibility_score * 100,
+                     (c.url or "—")[:60])
+    logger.info("")
+    logger.info("  ⏱  %s", _elapsed(t0))
+    logger.info("")
+
+    # ──────────────────────────────────────────────────────────────────────
+    #  STEP 6 — FEEDBACK LOOP
+    # ──────────────────────────────────────────────────────────────────────
     total_elapsed = time.time() - pipeline_start
     result.metadata.update({
         "retrieval_rounds": total_rounds,
@@ -364,10 +422,11 @@ async def run_verification_pipeline(
         "total_time": f"{total_elapsed*1000:.0f}ms",
     })
 
-    # 7. FEEDBACK LOOP: Store verified claim + web evidence back into KB
     if result.verdict != Verdict.NOT_ENOUGH_EVIDENCE and result.confidence >= 0.3:
-        logger.info("\n[STEP 6/6] FEEDBACK LOOP - Updating KB")
-        logger.info("-" * 80)
+        logger.info("┌─────────────────────────────────────────────────────────────────┐")
+        logger.info("│  STEP 6/6 ▸ FEEDBACK LOOP — Storing in KB                      │")
+        logger.info("└─────────────────────────────────────────────────────────────────┘")
+        logger.info("")
         t0 = time.time()
         try:
             evidence_dicts = [
@@ -394,31 +453,44 @@ async def run_verification_pipeline(
                 evidence_chunks=evidence_dicts,
             )
             result.metadata["feedback_stored"] = True
-            logger.info("  ✓ KB updated [%s]", _elapsed(t0))
+            logger.info("  ✓ Stored claim + %d citations + %d evidence chunks",
+                         len(citation_dicts), len(evidence_dicts))
         except Exception as exc:
             logger.warning("  ⚠ Feedback loop failed (non-critical): %s", exc)
             result.metadata["feedback_stored"] = False
         step_times["6_feedback_loop"] = time.time() - t0
+        logger.info("  ⏱  %s", _elapsed(t0))
+        logger.info("")
     else:
-        logger.info("\n  Skipping feedback loop (verdict=%s, confidence=%.2f)",
-                    result.verdict.value, result.confidence)
+        logger.info("")
+        logger.info("  ℹ  Skipping feedback loop (verdict=%s, confidence=%.2f)",
+                     result.verdict.value, result.confidence)
         result.metadata["feedback_stored"] = False
+        logger.info("")
 
+    # ──────────────────────────────────────────────────────────────────────
+    #  SUMMARY
+    # ──────────────────────────────────────────────────────────────────────
     total_elapsed = time.time() - pipeline_start
 
-    logger.info("\n" + "=" * 80)
-    logger.info("VERIFICATION PIPELINE COMPLETED")
-    logger.info("=" * 80)
-    logger.info("FINAL VERDICT: %s", result.verdict.value)
-    logger.info("CONFIDENCE: %.2f", result.confidence)
-    logger.info("CITATIONS: %d", len(result.citations))
-    logger.info("KB UPDATED: %s", result.metadata.get("feedback_stored", False))
-    logger.info("─" * 40)
-    logger.info("⏱ TIMING BREAKDOWN:")
+    logger.info("╔" + "═" * 78 + "╗")
+    logger.info("║  PIPELINE COMPLETE" + " " * 59 + "║")
+    logger.info("╠" + "═" * 78 + "╣")
+    logger.info("║  Verdict     : %-62s║", result.verdict.value)
+    logger.info("║  Confidence  : %-62s║", f"{result.confidence:.2f}")
+    logger.info("║  Citations   : %-62s║", str(len(result.citations)))
+    logger.info("║  KB Updated  : %-62s║", str(result.metadata.get("feedback_stored", False)))
+    logger.info("╠" + "═" * 78 + "╣")
+    logger.info("║  TIMING BREAKDOWN" + " " * 60 + "║")
+    logger.info("║" + "─" * 78 + "║")
     for step_name, step_time in step_times.items():
         pct = (step_time / total_elapsed * 100) if total_elapsed > 0 else 0
-        logger.info("  %-25s %7.0fms  (%4.1f%%)", step_name, step_time * 1000, pct)
-    logger.info("  %-25s %7.0fms  (100%%)", "TOTAL", total_elapsed * 1000)
-    logger.info("=" * 80 + "\n")
+        line = f"  {step_name:<25s} {step_time * 1000:>7.0f}ms  ({pct:>4.1f}%)"
+        logger.info("║%-78s║", line)
+    total_line = f"  {'TOTAL':<25s} {total_elapsed * 1000:>7.0f}ms  (100.0%)"
+    logger.info("║" + "─" * 78 + "║")
+    logger.info("║%-78s║", total_line)
+    logger.info("╚" + "═" * 78 + "╝")
+    logger.info("")
 
     return result

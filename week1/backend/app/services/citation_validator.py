@@ -37,14 +37,6 @@ def _best_match_score(quote: str, evidence: list[EvidenceChunk]) -> tuple[float,
     return best_score, best_chunk
 
 
-def _find_reputed_source_for_topic(evidence: list[EvidenceChunk]) -> tuple[str, str]:
-    """Find the best reputed (url, source_name) pair from the evidence list."""
-    for chunk in evidence:
-        if chunk.source_url and _is_reputed_url(chunk.source_url):
-            return chunk.source_url, chunk.source_name
-    return "", ""
-
-
 def _source_name_from_url(url: str) -> str:
     """Extract a readable source name from a URL (e.g. 'en.wikipedia.org')."""
     if not url:
@@ -60,9 +52,26 @@ def _source_name_from_url(url: str) -> str:
         return url[:60]
 
 
+def _is_valid_url(url: str) -> bool:
+    """Return True if the URL is a real, specific article link (not just a domain root)."""
+    if not url or not url.startswith(("http://", "https://")):
+        return False
+    # Reject generic domain-only URLs like "https://www.politifact.com/"
+    try:
+        from urllib.parse import urlparse
+        parsed = urlparse(url)
+        path = parsed.path.strip("/")
+        # If path is empty or just a single segment like "factchecks", it's too generic
+        if not path or len(path) < 5:
+            return False
+    except Exception:
+        pass
+    return True
+
+
 def _is_reputed_url(url: str) -> bool:
     """Return True if the URL belongs to a reputed news/reference source."""
-    if not url:
+    if not _is_valid_url(url):
         return False
     return score_source(url) >= MIN_CREDIBILITY_FOR_LINK
 
@@ -87,33 +96,29 @@ async def validate_citations(
     - Only link URLs from reputed news/reference sources.
     - Also filter sub-claim source URLs for reputation.
     """
-    # --- 1. Filter sub-claim source URLs for reputation ---
-    #     Strip non-reputed URLs; try to assign a reputed fallback from evidence.
-    #     IMPORTANT: when swapping a URL, also update the source name to match.
-    fallback_url, fallback_name = _find_reputed_source_for_topic(evidence)
-    url_fixed = 0
+    # --- 1. Filter sub-claim sources ---
+    #     Remove internal "Verified Claim (System)" entries and sources with no URL.
+    #     Keep ALL sources that have a valid URL (credibility score is shown to user).
+    url_kept = 0
     url_stripped = 0
     for sc in result.sub_claims:
-        for s in sc.supporting_sources + sc.contradicting_sources:
-            if s.url and _is_reputed_url(s.url):
-                continue  # already good
-            if s.url and not _is_reputed_url(s.url):
-                # Non-reputed URL → try fallback
-                if fallback_url:
-                    s.url = fallback_url
-                    s.name = fallback_name or _source_name_from_url(fallback_url)
-                    url_fixed += 1
-                else:
-                    s.url = ""
-                    url_stripped += 1
-            elif not s.url and fallback_url:
-                # No URL at all → assign fallback
-                s.url = fallback_url
-                s.name = fallback_name or _source_name_from_url(fallback_url)
-                url_fixed += 1
-    if url_fixed or url_stripped:
-        logger.info("Sub-claim sources: %d assigned reputed URL, %d stripped (no reputed URL available)",
-                    url_fixed, url_stripped)
+        # Remove system entries entirely
+        sc.supporting_sources = [
+            s for s in sc.supporting_sources
+            if "Verified Claim" not in s.name
+        ]
+        sc.contradicting_sources = [
+            s for s in sc.contradicting_sources
+            if "Verified Claim" not in s.name
+        ]
+        # Keep sources that have a valid URL; remove those without
+        sc.supporting_sources = [
+            s for s in sc.supporting_sources if s.url and _is_valid_url(s.url)
+        ]
+        sc.contradicting_sources = [
+            s for s in sc.contradicting_sources if s.url and _is_valid_url(s.url)
+        ]
+        url_kept += len(sc.supporting_sources) + len(sc.contradicting_sources)
 
     # --- 2. Validate top-level citations ---
     if not result.citations:
@@ -126,6 +131,10 @@ async def validate_citations(
     stripped_count = 0
     
     for i, cit in enumerate(result.citations, 1):
+        if "Verified Claim" in cit.source_name:
+            logger.debug("  Citation %d: System entry, skipping", i)
+            stripped_count += 1
+            continue
         if not cit.relevant_quote:
             logger.debug("  Citation %d: Empty quote, skipping", i)
             stripped_count += 1
@@ -140,27 +149,23 @@ async def validate_citations(
             cit.credibility_score = matched_chunk.credibility_score
             cit.retrieval_method = matched_chunk.retrieval_method
 
-            # Only link reputed sources
-            if _is_reputed_url(real_url):
+            # Prefer matched chunk's real URL; fall back to LLM's URL if valid
+            if _is_valid_url(real_url):
                 cit.url = real_url
-                # Ensure source name matches the URL, not what the LLM hallucinated
                 cit.source_name = matched_chunk.source_name or _source_name_from_url(real_url)
+            elif _is_valid_url(cit.url):
+                # Matched chunk has no valid URL, but LLM provided one — keep it
+                cit.source_name = _source_name_from_url(cit.url) or cit.source_name
+                logger.debug(
+                    "  Citation %d: using LLM-provided URL: %s",
+                    i, cit.url[:80],
+                )
             else:
-                # Fallback: find ANY reputed URL from the evidence pool
-                fb_url, fb_name = _find_reputed_source_for_topic(evidence)
-                if fb_url:
-                    cit.url = fb_url
-                    cit.source_name = fb_name or _source_name_from_url(fb_url)
-                    logger.debug(
-                        "  Citation %d: matched chunk URL not reputed, using fallback: %s (%s)",
-                        i, fb_url[:60], cit.source_name,
-                    )
-                else:
-                    cit.url = ""
-                    logger.debug(
-                        "  Citation %d: no reputed URL found in evidence pool",
-                        i,
-                    )
+                cit.url = ""
+                logger.debug(
+                    "  Citation %d: no valid URL available — text-only",
+                    i,
+                )
 
             validated.append(cit)
             logger.debug(
@@ -168,11 +173,20 @@ async def validate_citations(
                 i, score, cit.source_name, "linked" if cit.url else "text-only"
             )
         else:
-            logger.warning(
-                "  Citation %d: ✗ STRIPPED (score=%d < %d, quote='%s')",
-                i, score, FUZZY_THRESHOLD, cit.relevant_quote[:60]
-            )
-            stripped_count += 1
+            # Low fuzzy match — but if LLM provided a valid URL, keep the citation
+            if _is_valid_url(cit.url):
+                cit.source_name = _source_name_from_url(cit.url) or cit.source_name
+                validated.append(cit)
+                logger.debug(
+                    "  Citation %d: low fuzzy match but LLM URL is valid — KEPT (%s)",
+                    i, cit.url[:60],
+                )
+            else:
+                logger.warning(
+                    "  Citation %d: ✗ STRIPPED (score=%d < %d, quote='%s')",
+                    i, score, FUZZY_THRESHOLD, cit.relevant_quote[:60]
+                )
+                stripped_count += 1
 
     # --- 3. Deduplicate citations by URL ---
     seen_urls: set[str] = set()

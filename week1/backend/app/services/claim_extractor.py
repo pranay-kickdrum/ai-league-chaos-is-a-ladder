@@ -1,9 +1,10 @@
-"""LLM-based claim extraction and decomposition."""
+"""Claim extraction and decomposition – heuristic-first, LLM fallback."""
 
 from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
 
 from openai import AsyncOpenAI
@@ -14,6 +15,16 @@ logger = logging.getLogger(__name__)
 
 _client: Optional[AsyncOpenAI] = None
 
+# Thresholds for heuristic path
+_SHORT_TEXT_LIMIT = 300          # characters – below this, skip the LLM
+_MAX_SENTENCES_FOR_HEURISTIC = 3  # up to 3 sentences → heuristic is fine
+
+# Conjunctions / clause boundaries used to split compound claims
+_SPLIT_PATTERN = re.compile(
+    r"\s+(?:and|but|while|whereas|however|also|meanwhile|additionally)\s+",
+    re.IGNORECASE,
+)
+
 
 def _get_client() -> AsyncOpenAI:
     global _client
@@ -23,7 +34,78 @@ def _get_client() -> AsyncOpenAI:
 
 
 # ---------------------------------------------------------------------------
-# Claim extraction
+# Lightweight text cleanup (no LLM needed)
+# ---------------------------------------------------------------------------
+
+def _clean_text(text: str) -> str:
+    """Basic cleanup: strip whitespace, collapse spaces, remove stray quotes."""
+    text = text.strip().strip('"').strip("'").strip()
+    text = re.sub(r"\s+", " ", text)
+    # Capitalize first letter if lowercase
+    if text and text[0].islower():
+        text = text[0].upper() + text[1:]
+    # Ensure it ends with a period if it doesn't end with punctuation
+    if text and text[-1] not in ".!?":
+        text += "."
+    return text
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Simple sentence splitter."""
+    # Split on period/exclamation/question followed by space + uppercase letter
+    parts = re.split(r'(?<=[.!?])\s+(?=[A-Z])', text)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _decompose_heuristic(claim: str) -> list[str]:
+    """Split a compound claim on conjunctions into sub-claims.
+
+    Only splits if the resulting parts each look like standalone facts
+    (contain at least 5 words). Otherwise returns the claim as-is.
+    """
+    parts = _SPLIT_PATTERN.split(claim)
+    # Filter: each part must be a meaningful statement (>= 5 words)
+    valid = [_clean_text(p) for p in parts if len(p.split()) >= 5]
+
+    if len(valid) >= 2:
+        return valid
+    return [claim]
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+async def extract_and_decompose(raw_text: str) -> tuple[str, list[str]]:
+    """Extract claim and decompose into sub-claims.
+
+    FAST PATH (heuristic): For short inputs (≤ 300 chars / ≤ 3 sentences),
+    skip the LLM entirely — clean up the text, split on conjunctions.
+
+    SLOW PATH (LLM): For longer / complex multi-paragraph text, use the
+    LLM to extract the main claim from an article.
+    """
+    text = raw_text.strip()
+    sentences = _split_sentences(text)
+
+    # --- Fast path: short input → heuristic ---
+    if len(text) <= _SHORT_TEXT_LIMIT and len(sentences) <= _MAX_SENTENCES_FOR_HEURISTIC:
+        logger.info("FAST PATH: Input is short (%d chars, %d sentences) – using heuristic",
+                     len(text), len(sentences))
+        claim = _clean_text(text)
+        sub_claims = _decompose_heuristic(claim)
+        logger.info("  Claim: '%s'", claim[:150])
+        logger.info("  Sub-claims: %d", len(sub_claims))
+        return claim, sub_claims
+
+    # --- Slow path: long / complex input → LLM ---
+    logger.info("SLOW PATH: Input is long (%d chars, %d sentences) – using LLM",
+                 len(text), len(sentences))
+    return await _llm_extract_and_decompose(text)
+
+
+# ---------------------------------------------------------------------------
+# LLM-based extraction (only for long / complex text)
 # ---------------------------------------------------------------------------
 
 EXTRACT_AND_DECOMPOSE_SYSTEM = """\
@@ -43,14 +125,7 @@ EXTRACTION RULES:
 
 DECOMPOSITION RULES:
 - ONLY decompose if the claim contains 2+ GENUINELY DIFFERENT facts to verify.
-  Example that SHOULD be decomposed:
-    "Tesla's revenue was $25B in Q3 2024 and Elon Musk is the richest person in the world"
-    → ["Tesla's revenue was $25 billion in Q3 2024", "Elon Musk is the richest person in the world"]
-  Example that should NOT be decomposed (single fact):
-    "The Earth is approximately 4.5 billion years old"
-    → ["The Earth is approximately 4.5 billion years old"]
-- Do NOT create rephrased variants or search-style rewrites of the same fact. \
-  Two sub-claims meaning the same thing is a waste.
+- Do NOT create rephrased variants or search-style rewrites of the same fact.
 - If the claim is already a single atomic fact, return it as a single-item list.
 - Each sub-claim must be a self-contained, search-friendly factual statement.
 - Preserve all numbers, dates, names exactly.
@@ -61,9 +136,9 @@ RESPOND IN THIS EXACT JSON FORMAT (no markdown, just raw JSON):
 If no claim found: {"claim": "NO_CLAIM", "sub_claims": []}"""
 
 
-async def extract_and_decompose(raw_text: str) -> tuple[str, list[str]]:
-    """Extract claim and decompose into sub-claims in a SINGLE LLM call."""
-    logger.info("Extracting + decomposing from %d characters of text", len(raw_text))
+async def _llm_extract_and_decompose(raw_text: str) -> tuple[str, list[str]]:
+    """LLM-based extraction + decomposition for long/complex text."""
+    logger.info("Extracting + decomposing from %d characters of text via LLM", len(raw_text))
     client = _get_client()
     resp = await client.chat.completions.create(
         model=settings.fast_llm_model,
