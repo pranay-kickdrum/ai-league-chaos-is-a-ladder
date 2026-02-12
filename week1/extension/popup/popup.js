@@ -70,7 +70,7 @@ function renderResult(result) {
   if (resultReasoning) resultReasoning.textContent =
     result.reasoning || "No reasoning provided.";
 
-  // Sub-claims
+  // Sub-claims (with structured sources as URL links)
   if (result.sub_claims && result.sub_claims.length) {
     if (subClaimsBlock) subClaimsBlock.style.display = "block";
     if (subClaimsList) {
@@ -78,9 +78,49 @@ function renderResult(result) {
       result.sub_claims.forEach((sc) => {
         const d = document.createElement("div");
         d.className = "sub-claim-item";
+
+        let sourcesHtml = "";
+
+        // Supporting sources
+        if (sc.supporting_sources && sc.supporting_sources.length) {
+          sourcesHtml += '<div class="sub-claim-source-label">Supporting:</div>';
+          sc.supporting_sources.forEach((s) => {
+            if (typeof s === "object" && s.name) {
+              const link = s.url
+                ? '<a href="' + escapeHtml(s.url) + '" target="_blank">' + escapeHtml(s.name) + "</a>"
+                : escapeHtml(s.name);
+              const summary = s.summary ? " – " + escapeHtml(s.summary) : "";
+              sourcesHtml += '<div class="sub-claim-source-item">\u2713 ' + link + summary + "</div>";
+            } else {
+              sourcesHtml += '<div class="sub-claim-source-item">\u2713 ' + escapeHtml(String(s)) + "</div>";
+            }
+          });
+        }
+
+        // Contradicting sources
+        if (sc.contradicting_sources && sc.contradicting_sources.length) {
+          sourcesHtml += '<div class="sub-claim-source-label">Contradicting:</div>';
+          sc.contradicting_sources.forEach((s) => {
+            if (typeof s === "object" && s.name) {
+              const link = s.url
+                ? '<a href="' + escapeHtml(s.url) + '" target="_blank">' + escapeHtml(s.name) + "</a>"
+                : escapeHtml(s.name);
+              const summary = s.summary ? " – " + escapeHtml(s.summary) : "";
+              sourcesHtml += '<div class="sub-claim-source-item">\u2717 ' + link + summary + "</div>";
+            } else {
+              sourcesHtml += '<div class="sub-claim-source-item">\u2717 ' + escapeHtml(String(s)) + "</div>";
+            }
+          });
+        }
+
+        const sourcesBlock = sourcesHtml
+          ? '<div class="sub-claim-sources">' + sourcesHtml + "</div>"
+          : "";
+
         d.innerHTML =
           '<span class="sub-claim-item__verdict">[' +
-          escapeHtml(sc.verdict) + "]</span> " + escapeHtml(sc.text);
+          escapeHtml(sc.verdict) + "]</span> " + escapeHtml(sc.text) +
+          sourcesBlock;
         subClaimsList.appendChild(d);
       });
     }

@@ -15,14 +15,33 @@ _model = None
 MODEL_NAME = "cross-encoder/ms-marco-MiniLM-L-6-v2"
 
 
+def warmup_model():
+    """Eagerly load the cross-encoder model (call at server startup)."""
+    _get_model()
+
+
 def _get_model():
-    """Lazy-load the cross-encoder model (first call downloads ~80 MB)."""
+    """Lazy-load the cross-encoder model from local cache (no HuggingFace Hub checks)."""
     global _model
     if _model is None:
+        import os
         from sentence_transformers import CrossEncoder
 
-        _model = CrossEncoder(MODEL_NAME)
-        logger.info("Loaded cross-encoder model: %s", MODEL_NAME)
+        # Skip all HuggingFace Hub HTTP calls -- use local cache only
+        # The model is already downloaded (~80 MB), no need to check for updates
+        os.environ["HF_HUB_OFFLINE"] = "1"
+        os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
+        try:
+            _model = CrossEncoder(MODEL_NAME, local_files_only=True)
+            logger.info("Loaded cross-encoder model from local cache: %s", MODEL_NAME)
+        except Exception:
+            # First run ever -- need to download, so go online
+            logger.info("Model not in cache, downloading from HuggingFace Hub...")
+            os.environ.pop("HF_HUB_OFFLINE", None)
+            os.environ.pop("TRANSFORMERS_OFFLINE", None)
+            _model = CrossEncoder(MODEL_NAME)
+            logger.info("Downloaded and loaded cross-encoder model: %s", MODEL_NAME)
     return _model
 
 

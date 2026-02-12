@@ -9,7 +9,7 @@ from rank_bm25 import BM25Okapi
 
 from app.config import settings
 from app.models import EvidenceChunk
-from app.services.embedder import embed_query, get_collection, query_collection
+from app.services.embedder import batch_query_collection, embed_query, get_collection, query_collection
 from app.knowledge_base.sources import score_source
 
 logger = logging.getLogger(__name__)
@@ -22,6 +22,11 @@ logger = logging.getLogger(__name__)
 _bm25_index: Optional[BM25Okapi] = None
 _bm25_corpus_docs: list[dict] = []  # parallel list of {text, metadata}
 _bm25_corpus_size: int = 0
+
+
+def warmup_bm25_index() -> None:
+    """Eagerly build the BM25 index (call at server startup)."""
+    _get_bm25()
 
 
 def _rebuild_bm25_index() -> None:
@@ -94,10 +99,19 @@ def reciprocal_rank_fusion(
 # Dense retrieval
 # ---------------------------------------------------------------------------
 
-def _dense_retrieve(query: str, top_k: int, where: Optional[dict] = None) -> list[dict]:
+def _dense_retrieve(
+    query: str,
+    top_k: int,
+    where: Optional[dict] = None,
+    query_embedding: Optional[list[float]] = None,
+) -> list[dict]:
     """Return top-k results from ChromaDB dense vector search."""
-    logger.debug("  [Dense Search] Embedding query...")
-    query_emb = embed_query(query)
+    if query_embedding is not None:
+        query_emb = query_embedding
+        logger.debug("  [Dense Search] Using pre-computed embedding")
+    else:
+        logger.debug("  [Dense Search] Embedding query...")
+        query_emb = embed_query(query)
     logger.debug("  [Dense Search] Querying ChromaDB for top-%d matches...", top_k)
     
     results = query_collection(query_emb, n_results=top_k, where=where)
@@ -159,15 +173,20 @@ async def hybrid_retrieve(
     dense_top_k: int | None = None,
     bm25_top_k: int | None = None,
     where: Optional[dict] = None,
+    query_embedding: Optional[list[float]] = None,
 ) -> list[EvidenceChunk]:
-    """Run hybrid retrieval and return merged, de-duplicated EvidenceChunks."""
+    """Run hybrid retrieval and return merged, de-duplicated EvidenceChunks.
+
+    If *query_embedding* is provided the dense branch skips the OpenAI call
+    (useful when embeddings were batch-computed upfront).
+    """
     dk = dense_top_k or settings.dense_top_k
     bk = bm25_top_k or settings.bm25_top_k
 
     logger.debug("  [Hybrid Retrieval] Query: '%s'", query[:80])
     logger.debug("  [Hybrid Retrieval] Running parallel: Dense (top-%d) + BM25 (top-%d)", dk, bk)
     
-    dense_results = _dense_retrieve(query, dk, where=where)
+    dense_results = _dense_retrieve(query, dk, where=where, query_embedding=query_embedding)
     bm25_results = _bm25_retrieve(query, bk)
 
     logger.debug("  [Hybrid Retrieval] Applying Reciprocal Rank Fusion (k=%d)...", settings.rrf_k)
@@ -196,3 +215,85 @@ async def hybrid_retrieve(
         len(chunks),
     )
     return chunks
+
+
+async def batch_hybrid_retrieve(
+    queries: list[str],
+    query_embeddings: list[list[float]],
+    dense_top_k: int | None = None,
+    bm25_top_k: int | None = None,
+) -> list[list[EvidenceChunk]]:
+    """Retrieve evidence for *multiple* queries in a single batched operation.
+
+    1. ONE ChromaDB call with all embeddings (biggest win).
+    2. Per-query BM25 search (local, fast – no benefit from batching).
+    3. Per-query RRF fusion.
+
+    Returns a list of EvidenceChunk lists, one per input query.
+    """
+    if not queries:
+        return []
+
+    dk = dense_top_k or settings.dense_top_k
+    bk = bm25_top_k or settings.bm25_top_k
+
+    logger.info(
+        "  [Batch Retrieval] %d queries, Dense top-%d, BM25 top-%d",
+        len(queries), dk, bk,
+    )
+
+    # --- 1. ONE batched ChromaDB dense query ---------------------------------
+    batch_raw = batch_query_collection(query_embeddings, n_results=dk)
+
+    # Parse each query's raw ChromaDB results into doc dicts
+    all_dense: list[list[dict]] = []
+    for i, raw in enumerate(batch_raw):
+        docs: list[dict] = []
+        if raw.get("documents") and raw["documents"][0]:
+            for text, meta, dist in zip(
+                raw["documents"][0],
+                raw["metadatas"][0],
+                raw["distances"][0],
+            ):
+                docs.append({"text": text, "metadata": meta, "score": 1.0 - dist})
+        all_dense.append(docs)
+        logger.debug("    Query %d dense: %d results", i + 1, len(docs))
+
+    # --- 2. Per-query BM25 (local, fast) ------------------------------------
+    all_bm25: list[list[dict]] = []
+    for i, q in enumerate(queries):
+        bm25_results = _bm25_retrieve(q, bk)
+        all_bm25.append(bm25_results)
+        logger.debug("    Query %d BM25: %d results", i + 1, len(bm25_results))
+
+    # --- 3. Per-query RRF fusion → EvidenceChunks ----------------------------
+    all_chunks: list[list[EvidenceChunk]] = []
+    for i, (dense_results, bm25_results) in enumerate(zip(all_dense, all_bm25)):
+        merged = reciprocal_rank_fusion([dense_results, bm25_results], k=settings.rrf_k)
+        chunks: list[EvidenceChunk] = []
+        for doc in merged:
+            meta = doc.get("metadata", {})
+            url = meta.get("source_url", "")
+            chunks.append(
+                EvidenceChunk(
+                    text=doc["text"],
+                    source_name=meta.get("source_name", "Unknown"),
+                    source_url=url,
+                    publish_date=meta.get("publish_date", "unknown"),
+                    category=meta.get("category", "unknown"),
+                    credibility_score=meta.get("credibility_score", score_source(url)),
+                    retrieval_method="knowledge_base",
+                    relevance_score=doc.get("score", 0.0),
+                )
+            )
+        all_chunks.append(chunks)
+        logger.debug(
+            "    Query %d fused: %d dense + %d bm25 → %d merged",
+            i + 1, len(dense_results), len(bm25_results), len(chunks),
+        )
+
+    logger.info(
+        "  [Batch Retrieval] Done: %s chunks per query",
+        [len(c) for c in all_chunks],
+    )
+    return all_chunks

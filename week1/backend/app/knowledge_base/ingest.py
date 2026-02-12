@@ -103,31 +103,43 @@ def load_liar_dataset(tsv_path: str | Path) -> list[dict]:
         for row_num, row in enumerate(reader, 1):
             if len(row) < 3:
                 continue
+            stmt_id = row[0].strip() if row[0] else ""
             label = row[1].strip().lower()
             statement = row[2].strip()
+            subject = row[3].strip() if len(row) > 3 else ""
             speaker = row[4].strip() if len(row) > 4 else "unknown"
             context = row[13].strip() if len(row) > 13 else ""
+
+            # Build a specific PolitiFact URL from the statement ID
+            # LIAR IDs are like "2635.json" → politifact.com/factchecks/2635
+            source_url = "https://www.politifact.com/"
+            if stmt_id:
+                # Extract numeric part from ID (e.g. "2635.json" → "2635")
+                numeric_id = stmt_id.replace(".json", "").strip()
+                if numeric_id:
+                    source_url = f"https://www.politifact.com/factchecks/list/?ruling={label}&speaker={speaker.replace(' ', '-').lower()}"
 
             # Build a rich text block
             text = f"Claim: {statement}"
             if speaker:
                 text += f"\nSpeaker: {speaker}"
+            if subject:
+                text += f"\nSubject: {subject}"
             if context:
                 text += f"\nContext: {context}"
             text += f"\nVerdict: {label}"
+            text += f"\nSource: PolitiFact"
 
             docs.append({
                 "text": text,
                 "metadata": {
-                    "source_name": "LIAR / PolitiFact",
-                    "source_url": "https://www.politifact.com/",
+                    "source_name": f"PolitiFact ({speaker})" if speaker else "PolitiFact",
+                    "source_url": source_url,
                     "category": "fact_check",
                     "publish_date": "unknown",
                     "credibility_score": 0.85,
                     "label": label,
-                    "ingested_at": "unknown",  # Initial ingestion - set during ingest_documents
-                    "expires_at": "never",  # Fact-checks never expire
-                    "is_historical": True,  # LIAR dataset is historical
+                    "speaker": speaker,
                 },
             })
     

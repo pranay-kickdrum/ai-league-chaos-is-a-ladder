@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,10 +19,52 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------------------
+# Startup: eagerly initialise heavy resources so first request is fast
+# ---------------------------------------------------------------------------
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Pre-load ChromaDB, BM25 index, and cross-encoder model at startup."""
+    t0 = time.time()
+    logger.info("=" * 70)
+    logger.info("SERVER STARTUP: Pre-loading resources...")
+    logger.info("=" * 70)
+
+    # 1. ChromaDB collection (also triggers client init)
+    from app.services.embedder import get_collection
+    logger.info("[1/3] Loading ChromaDB collection...")
+    collection = get_collection()
+    logger.info("  ✓ ChromaDB ready (%d documents)", collection.count())
+
+    # 2. BM25 index
+    from app.services.retriever import warmup_bm25_index
+    logger.info("[2/3] Building BM25 index...")
+    warmup_bm25_index()
+    logger.info("  ✓ BM25 index ready")
+
+    # 3. Cross-encoder reranker model
+    from app.services.reranker import warmup_model
+    logger.info("[3/3] Loading cross-encoder reranker model...")
+    warmup_model()
+    logger.info("  ✓ Reranker model ready")
+
+    elapsed = time.time() - t0
+    logger.info("=" * 70)
+    logger.info("SERVER READY — all resources loaded in %.1fs", elapsed)
+    logger.info("=" * 70)
+
+    yield  # server is running
+
+    logger.info("Server shutting down...")
+
+
 app = FastAPI(
     title="Claim Verification API",
     description="Real-Time News Claim Verification using RAG + Agentic RAG",
     version="1.0.0",
+    lifespan=lifespan,
 )
 
 # -- CORS (allow browser extension & local dev) --

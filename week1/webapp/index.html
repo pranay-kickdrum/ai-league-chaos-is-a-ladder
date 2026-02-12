@@ -160,7 +160,7 @@
     .card p, .card ul { font-size: 14px; line-height: 1.6; }
 
     .sub-claim {
-      padding: 8px 0;
+      padding: 10px 0;
       border-bottom: 1px solid #334155;
       font-size: 13px;
     }
@@ -168,6 +168,33 @@
     .sub-claim:last-child { border-bottom: none; }
 
     .sub-claim strong { margin-right: 6px; }
+
+    .sub-claim-sources {
+      margin-top: 6px;
+      padding-left: 12px;
+      font-size: 12px;
+    }
+
+    .sub-claim-sources a {
+      color: var(--blue);
+      text-decoration: none;
+      word-break: break-all;
+    }
+
+    .sub-claim-sources a:hover { text-decoration: underline; }
+
+    .sub-claim-source-item {
+      margin-top: 3px;
+      color: var(--text-dim);
+    }
+
+    .sub-claim-source-label {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+      color: var(--text-dim);
+      margin-top: 4px;
+    }
 
     .citation {
       padding: 8px 0;
@@ -313,11 +340,44 @@
         const scList = document.getElementById("subClaimsList");
         if (r.sub_claims && r.sub_claims.length) {
           scCard.style.display = "block";
-          scList.innerHTML = r.sub_claims.map(sc => `
-            <div class="sub-claim">
-              <strong>[${escapeHtml(sc.verdict)}]</strong> ${escapeHtml(sc.text)}
-            </div>
-          `).join("");
+          scList.innerHTML = r.sub_claims.map(sc => {
+            let sourcesHtml = "";
+
+            // Supporting sources
+            if (sc.supporting_sources && sc.supporting_sources.length) {
+              sourcesHtml += '<div class="sub-claim-source-label">Supporting:</div>';
+              sourcesHtml += sc.supporting_sources.map(s => {
+                if (typeof s === "object" && s.name) {
+                  const link = s.url ? `<a href="${escapeHtml(s.url)}" target="_blank">${escapeHtml(s.name)}</a>` : escapeHtml(s.name);
+                  const summary = s.summary ? ` – ${escapeHtml(s.summary)}` : "";
+                  return `<div class="sub-claim-source-item">✓ ${link}${summary}</div>`;
+                }
+                return `<div class="sub-claim-source-item">✓ ${escapeHtml(String(s))}</div>`;
+              }).join("");
+            }
+
+            // Contradicting sources
+            if (sc.contradicting_sources && sc.contradicting_sources.length) {
+              sourcesHtml += '<div class="sub-claim-source-label">Contradicting:</div>';
+              sourcesHtml += sc.contradicting_sources.map(s => {
+                if (typeof s === "object" && s.name) {
+                  const link = s.url ? `<a href="${escapeHtml(s.url)}" target="_blank">${escapeHtml(s.name)}</a>` : escapeHtml(s.name);
+                  const summary = s.summary ? ` – ${escapeHtml(s.summary)}` : "";
+                  return `<div class="sub-claim-source-item">✗ ${link}${summary}</div>`;
+                }
+                return `<div class="sub-claim-source-item">✗ ${escapeHtml(String(s))}</div>`;
+              }).join("");
+            }
+
+            const sourcesBlock = sourcesHtml ? `<div class="sub-claim-sources">${sourcesHtml}</div>` : "";
+
+            return `
+              <div class="sub-claim">
+                <strong>[${escapeHtml(sc.verdict)}]</strong> ${escapeHtml(sc.text)}
+                ${sourcesBlock}
+              </div>
+            `;
+          }).join("");
         } else {
           scCard.style.display = "none";
         }

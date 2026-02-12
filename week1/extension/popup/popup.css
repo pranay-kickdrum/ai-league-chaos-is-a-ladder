@@ -245,7 +245,7 @@ textarea:focus {
 
 /* Sub-claims */
 .sub-claim-item {
-  padding: 6px 0;
+  padding: 8px 0;
   border-bottom: 1px solid #334155;
   font-size: 12px;
 }
@@ -257,6 +257,35 @@ textarea:focus {
 .sub-claim-item__verdict {
   font-weight: 600;
   margin-right: 6px;
+}
+
+.sub-claim-sources {
+  margin-top: 5px;
+  padding-left: 10px;
+  font-size: 11px;
+}
+
+.sub-claim-sources a {
+  color: var(--blue);
+  text-decoration: none;
+  word-break: break-all;
+}
+
+.sub-claim-sources a:hover {
+  text-decoration: underline;
+}
+
+.sub-claim-source-item {
+  margin-top: 2px;
+  color: var(--text-dim);
+}
+
+.sub-claim-source-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+  color: var(--text-dim);
+  margin-top: 4px;
 }
 
 /* Citations */

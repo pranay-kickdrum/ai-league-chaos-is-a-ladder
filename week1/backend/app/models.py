@@ -45,13 +45,20 @@ class Citation(BaseModel):
     retrieval_method: str = "knowledge_base"
 
 
+class SubClaimSource(BaseModel):
+    """A source linked to a sub-claim verdict."""
+    name: str
+    url: str = ""
+    summary: str = ""
+
+
 class SubClaimResult(BaseModel):
     """Verification result for a single sub-claim."""
     text: str
     verdict: Verdict = Verdict.NOT_ENOUGH_EVIDENCE
     evidence_summary: str = ""
-    supporting_sources: list[str] = Field(default_factory=list)
-    contradicting_sources: list[str] = Field(default_factory=list)
+    supporting_sources: list[SubClaimSource] = Field(default_factory=list)
+    contradicting_sources: list[SubClaimSource] = Field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------

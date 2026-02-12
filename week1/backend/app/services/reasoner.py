@@ -6,7 +6,7 @@ import json
 import logging
 from typing import Optional
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from app.config import settings
 from app.models import (
@@ -14,19 +14,20 @@ from app.models import (
     EvidenceChunk,
     LLMVerificationOutput,
     SubClaimResult,
+    SubClaimSource,
     Verdict,
     VerifyResponse,
 )
 
 logger = logging.getLogger(__name__)
 
-_client: Optional[OpenAI] = None
+_client: Optional[AsyncOpenAI] = None
 
 
-def _get_client() -> OpenAI:
+def _get_client() -> AsyncOpenAI:
     global _client
     if _client is None:
-        _client = OpenAI(api_key=settings.openai_api_key)
+        _client = AsyncOpenAI(api_key=settings.openai_api_key)
     return _client
 
 
@@ -34,12 +35,22 @@ def _get_client() -> OpenAI:
 # Context assembly
 # ---------------------------------------------------------------------------
 
+MAX_EVIDENCE_FOR_LLM = 3       # send at most this many chunks
+MAX_CHUNK_CHARS = 400          # truncate each chunk to this length
+
+
 def assemble_context(evidence: list[EvidenceChunk]) -> str:
-    """Format evidence chunks into the context block for the LLM prompt."""
+    """Format evidence chunks into the context block for the LLM prompt.
+
+    Keeps only the top-N most relevant chunks and truncates each to stay
+    within a reasonable token budget so the LLM responds faster.
+    """
+    top = evidence[:MAX_EVIDENCE_FOR_LLM]
     parts: list[str] = []
-    for i, e in enumerate(evidence, 1):
+    for i, e in enumerate(top, 1):
+        text = e.text[:MAX_CHUNK_CHARS] + ("..." if len(e.text) > MAX_CHUNK_CHARS else "")
         parts.append(
-            f"[Source {i}]: {e.text}\n"
+            f"[Source {i}]: {text}\n"
             f"  (from: {e.source_name}, date: {e.publish_date}, "
             f"url: {e.source_url}, credibility: {e.credibility_score:.2f})"
         )
@@ -51,47 +62,45 @@ def assemble_context(evidence: list[EvidenceChunk]) -> str:
 # ---------------------------------------------------------------------------
 
 VERIFY_SYSTEM = """\
-You are a rigorous but resourceful fact-checking assistant. Given a CLAIM and EVIDENCE, \
-determine the verdict.
+Fact-checker. Given CLAIM + EVIDENCE, return a JSON verdict. Be concise.
 
-INSTRUCTIONS:
-1. Analyze each piece of evidence for relevance to the claim.
-2. Identify SUPPORTING evidence and CONTRADICTING evidence.
-3. Consider the credibility and recency of each source.
-4. If the claim contains multiple parts, evaluate each separately.
-5. Determine a verdict: TRUE, FALSE, MISLEADING, or NOT_ENOUGH_EVIDENCE.
+VERDICTS: TRUE, FALSE, MISLEADING, NOT_ENOUGH_EVIDENCE (last resort only).
+Use partial evidence with lower confidence rather than NOT_ENOUGH_EVIDENCE.
 
-IMPORTANT - MAKING A DETERMINATION:
-- TRY HARD to reach a TRUE, FALSE, or MISLEADING verdict. Use logical inference, \
-  cross-referencing, and contextual reasoning to bridge gaps in the evidence.
-- If evidence partially addresses the claim, use what's available and note limitations \
-  in your reasoning. Partial evidence is still useful.
-- Use MISLEADING when the claim is technically true but presented in a deceptive way, \
-  or when the truth is more nuanced than the claim suggests.
-- Only use NOT_ENOUGH_EVIDENCE as an absolute LAST RESORT when the evidence is \
-  completely unrelated to the claim topic and you cannot make any reasonable inference.
-- If you have evidence about the general topic but not the exact claim, still attempt \
-  a verdict with lower confidence (0.3-0.5) rather than giving up.
-
-RESPOND IN THIS EXACT JSON FORMAT (no markdown fences, just raw JSON):
+JSON FORMAT (raw JSON, no markdown fences):
 {
   "sub_claims": [
-    {"text": "...", "verdict": "TRUE|FALSE|MISLEADING|NOT_ENOUGH_EVIDENCE", "support": ["Source 1 summary"], "contradict": ["Source 3 summary"]}
+    {"text": "sub-claim", "verdict": "TRUE|FALSE|MISLEADING|NOT_ENOUGH_EVIDENCE",
+     "support": [{"name": "Source", "url": "url-from-evidence", "summary": "1 sentence"}],
+     "contradict": []}
   ],
   "verdict": "TRUE|FALSE|MISLEADING|NOT_ENOUGH_EVIDENCE",
   "confidence": 0.85,
-  "reasoning": "Step-by-step explanation of how you reached the verdict...",
+  "reasoning": "2-3 sentences max.",
   "citations": [
-    {"source_name": "Reuters", "url": "https://...", "relevant_quote": "exact quote from evidence"}
+    {"source_name": "Name", "url": "url", "relevant_quote": "short quote", "for_sub_claim": "sub-claim text"}
   ]
 }
 
-CRITICAL RULES:
-- ONLY cite sources from the provided evidence. NEVER fabricate a source or URL.
-- The "relevant_quote" MUST be an exact substring from the evidence text.
-- Explain your reasoning transparently, including what evidence supports/contradicts the claim.
-- confidence must be a float between 0.0 and 1.0.
-- Lower confidence is FINE – a verdict with 0.4 confidence is more useful than NOT_ENOUGH_EVIDENCE."""
+RULES:
+- NEVER fabricate URLs. Use ONLY exact urls from evidence "(url: ...)" fields.
+- NO DUPLICATE URLs across citations or sub-claim sources. Each URL appears ONCE.
+- Provide as many UNIQUE citations as possible (one per distinct source URL). Aim for 1-3.
+- "reasoning" must be 2-3 sentences, not longer.
+- "relevant_quote" max 50 characters.
+- confidence: float 0.0-1.0."""
+
+
+def _parse_source(raw_src) -> SubClaimSource:
+    """Parse a source entry from the LLM output – handles both string and dict forms."""
+    if isinstance(raw_src, dict):
+        return SubClaimSource(
+            name=raw_src.get("name", "Unknown"),
+            url=raw_src.get("url", ""),
+            summary=raw_src.get("summary", ""),
+        )
+    # Fallback: plain string (old format)
+    return SubClaimSource(name=str(raw_src), url="", summary=str(raw_src))
 
 
 async def verify_claim(
@@ -100,23 +109,25 @@ async def verify_claim(
     evidence: list[EvidenceChunk],
 ) -> VerifyResponse:
     """Run the LLM verification reasoning and return a structured VerifyResponse."""
-    logger.info("Assembling context from %d evidence chunks", len(evidence))
+    used_count = min(len(evidence), MAX_EVIDENCE_FOR_LLM)
+    logger.info("Assembling context: %d/%d evidence chunks (capped), %d chars/chunk",
+                used_count, len(evidence), MAX_CHUNK_CHARS)
     context = assemble_context(evidence)
-    logger.debug("Context length: %d characters", len(context))
+    logger.info("Context length: %d characters (~%d tokens)", len(context), len(context) // 4)
     
     client = _get_client()
 
     user_msg = f"CLAIM: {claim}\n\nEVIDENCE:\n{context}"
     
-    logger.info("Calling LLM (%s) for verification", settings.llm_model)
-    resp = client.chat.completions.create(
-        model=settings.llm_model,
+    logger.info("Calling LLM (%s) for verification", settings.fast_llm_model)
+    resp = await client.chat.completions.create(
+        model=settings.fast_llm_model,
         messages=[
             {"role": "system", "content": VERIFY_SYSTEM},
             {"role": "user", "content": user_msg},
         ],
         temperature=0.0,
-        max_tokens=2048,
+        max_tokens=512,
     )
 
     raw = resp.choices[0].message.content.strip()
@@ -157,18 +168,28 @@ async def verify_claim(
     logger.info("LLM confidence: %.2f", llm_out.confidence)
     logger.info("LLM produced %d sub-claims and %d citations", len(llm_out.sub_claims), len(llm_out.citations))
 
-    # Build sub-claim results
+    # Build sub-claim results with structured sources
     sub_results: list[SubClaimResult] = []
     for sc in llm_out.sub_claims:
+        raw_support = sc.get("support", [])
+        raw_contradict = sc.get("contradict", [])
+
+        supporting = [_parse_source(s) for s in raw_support]
+        contradicting = [_parse_source(s) for s in raw_contradict]
+
+        # Build evidence summary from support sources
+        summary_parts = [s.summary or s.name for s in supporting]
+        evidence_summary = "; ".join(summary_parts)
+
         sub_results.append(
             SubClaimResult(
                 text=sc.get("text", ""),
                 verdict=verdict_map.get(
                     sc.get("verdict", "").upper(), Verdict.NOT_ENOUGH_EVIDENCE
                 ),
-                evidence_summary="; ".join(sc.get("support", [])),
-                supporting_sources=sc.get("support", []),
-                contradicting_sources=sc.get("contradict", []),
+                evidence_summary=evidence_summary,
+                supporting_sources=supporting,
+                contradicting_sources=contradicting,
             )
         )
 
@@ -229,7 +250,7 @@ async def check_evidence_sufficiency(
     client = _get_client()
 
     logger.debug("Checking evidence sufficiency for claim (using top-%d chunks)", min(8, len(evidence)))
-    resp = client.chat.completions.create(
+    resp = await client.chat.completions.create(
         model=settings.fast_llm_model,
         messages=[
             {"role": "system", "content": SUFFICIENCY_SYSTEM},
@@ -270,7 +291,7 @@ async def reformulate_query(
     client = _get_client()
 
     logger.debug("Reformulating query (original: '%s')", original_query[:80])
-    resp = client.chat.completions.create(
+    resp = await client.chat.completions.create(
         model=settings.fast_llm_model,
         messages=[
             {"role": "system", "content": REFORMULATE_SYSTEM},

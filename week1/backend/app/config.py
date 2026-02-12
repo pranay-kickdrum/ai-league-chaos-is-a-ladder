@@ -47,11 +47,11 @@ class Settings(BaseSettings):
     # --- Retrieval ---
     dense_top_k: int = 20
     bm25_top_k: int = 20
-    rerank_top_k: int = 10
+    rerank_top_k: int = 5
     rrf_k: int = 60
 
     # --- Agentic ---
-    max_retrieval_rounds: int = 3
+    max_retrieval_rounds: int = 2
 
     # --- Web search ---
     web_search_max_results: int = 5
