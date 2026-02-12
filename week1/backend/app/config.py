@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     # --- Retrieval ---
     dense_top_k: int = 20
     bm25_top_k: int = 20
-    rerank_top_k: int = 5
+    rerank_top_k: int = 10
     rrf_k: int = 60
 
     # --- Agentic ---

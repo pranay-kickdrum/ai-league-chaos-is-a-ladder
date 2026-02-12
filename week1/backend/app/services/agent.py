@@ -28,9 +28,12 @@ async def _retrieve_evidence_for_subclaim(
     """Run the agentic retrieval loop for a single sub-claim.
 
     Returns (evidence_chunks, rounds_used).
+    Accumulates evidence across rounds instead of discarding previous rounds.
     """
     max_rounds = settings.max_retrieval_rounds
     query = sub_claim
+    accumulated_evidence: list[EvidenceChunk] = []
+    seen_keys: set[str] = set()
 
     logger.info("  → Retrieving evidence for: '%s'", sub_claim[:100])
 
@@ -51,17 +54,30 @@ async def _retrieve_evidence_for_subclaim(
         
         combined = kb_evidence + web_evidence
 
-        if not combined:
-            logger.warning("      ⚠ No evidence found in round %d", round_num + 1)
+        # Accumulate new unique evidence across rounds
+        new_count = 0
+        for e in combined:
+            key = e.text[:200]
+            if key not in seen_keys:
+                seen_keys.add(key)
+                accumulated_evidence.append(e)
+                new_count += 1
+
+        logger.info("      New unique evidence this round: %d (total accumulated: %d)",
+                    new_count, len(accumulated_evidence))
+
+        if not accumulated_evidence:
+            logger.warning("      ⚠ Still no evidence after round %d", round_num + 1)
             if round_num < max_rounds - 1:
                 query = await reformulate_query(query, [])
                 logger.info("      ↻ Reformulated query for next round")
                 continue
             return [], round_num + 1
 
-        # Rerank
-        reranked = await rerank(query, combined)
-        logger.info("      Reranked to top-%d chunks", len(reranked))
+        # Rerank ALL accumulated evidence
+        reranked = await rerank(query, accumulated_evidence)
+        logger.info("      Reranked to top-%d chunks (from %d accumulated)",
+                    len(reranked), len(accumulated_evidence))
 
         # Check sufficiency
         sufficient = await check_evidence_sufficiency(sub_claim, reranked)
@@ -76,11 +92,11 @@ async def _retrieve_evidence_for_subclaim(
             query = await reformulate_query(query, reranked)
             logger.info("      ↻ Query reformulated for next attempt")
         else:
-            # Last round – return whatever we have
-            logger.info("    ⚠ Max rounds reached, using available evidence")
+            # Last round – return whatever we have (don't throw it away!)
+            logger.info("    ⚠ Max rounds reached, returning %d accumulated evidence chunks", len(reranked))
             return reranked, round_num + 1
 
-    return [], max_rounds
+    return accumulated_evidence if accumulated_evidence else [], max_rounds
 
 
 async def run_verification_pipeline(
@@ -97,7 +113,7 @@ async def run_verification_pipeline(
     logger.info("INPUT: %s", raw_text[:200] + ("..." if len(raw_text) > 200 else ""))
     
     # 1. Extract the core claim
-    logger.info("\n[STEP 1/6] CLAIM EXTRACTION")
+    logger.info("\n[STEP 1/7] CLAIM EXTRACTION")
     logger.info("-" * 80)
     claim = await extract_claim(raw_text)
     logger.info("EXTRACTED CLAIM: %s", claim)
@@ -113,7 +129,7 @@ async def run_verification_pipeline(
         )
 
     # 2. Decompose into sub-claims
-    logger.info("\n[STEP 2/6] CLAIM DECOMPOSITION")
+    logger.info("\n[STEP 2/7] CLAIM DECOMPOSITION")
     logger.info("-" * 80)
     sub_claims = await decompose_claim(claim)
     logger.info("DECOMPOSED INTO %d SUB-CLAIMS:", len(sub_claims))
@@ -121,7 +137,7 @@ async def run_verification_pipeline(
         logger.info("  [%d] %s", i, sc)
 
     # 3. Retrieve evidence for each sub-claim (can parallelise)
-    logger.info("\n[STEP 3/6] EVIDENCE RETRIEVAL (AGENTIC LOOP)")
+    logger.info("\n[STEP 3/7] EVIDENCE RETRIEVAL (AGENTIC LOOP)")
     logger.info("-" * 80)
     all_evidence: list[EvidenceChunk] = []
     total_rounds = 0
@@ -143,26 +159,50 @@ async def run_verification_pipeline(
             seen.add(key)
             unique_evidence.append(e)
 
-    logger.info("\n[STEP 4/6] EVIDENCE CONSOLIDATION")
+    logger.info("\n[STEP 4/7] EVIDENCE CONSOLIDATION")
     logger.info("-" * 80)
     logger.info("Total evidence chunks: %d (before dedup)", len(all_evidence))
     logger.info("Unique evidence chunks: %d (after dedup)", len(unique_evidence))
     logger.info("Total retrieval rounds: %d", total_rounds)
+
+    # FALLBACK: If sub-claims yielded very little evidence, try the original broad claim
+    if len(unique_evidence) < 3:
+        logger.info("\n[STEP 4b/7] FALLBACK - Searching with original claim (low evidence: %d chunks)", len(unique_evidence))
+        logger.info("-" * 80)
+        fb_kb = await hybrid_retrieve(claim)
+        fb_web = await web_search(claim)
+        fb_combined = fb_kb + fb_web
+        
+        new_from_fallback = 0
+        for e in fb_combined:
+            key = e.text[:200]
+            if key not in seen:
+                seen.add(key)
+                unique_evidence.append(e)
+                new_from_fallback += 1
+        
+        logger.info("  Fallback search found %d new evidence chunks (total now: %d)",
+                    new_from_fallback, len(unique_evidence))
+        
+        # Rerank the expanded evidence set
+        if new_from_fallback > 0 and len(unique_evidence) > settings.rerank_top_k:
+            unique_evidence = await rerank(claim, unique_evidence)
+            logger.info("  Re-ranked expanded evidence to top-%d", len(unique_evidence))
     
     # Log evidence sources breakdown
     kb_count = sum(1 for e in unique_evidence if e.retrieval_method == "knowledge_base")
     web_count = sum(1 for e in unique_evidence if e.retrieval_method == "web_search")
     logger.info("Evidence sources: %d from KB, %d from Web", kb_count, web_count)
 
-    # 4. LLM reasoning
-    logger.info("\n[STEP 5/6] LLM REASONING & VERIFICATION")
+    # 5. LLM reasoning
+    logger.info("\n[STEP 5/7] LLM REASONING & VERIFICATION")
     logger.info("-" * 80)
     logger.info("Passing %d evidence chunks to LLM for analysis", len(unique_evidence))
     result = await verify_claim(claim, sub_claims, unique_evidence)
     logger.info("LLM VERDICT: %s (confidence: %.2f)", result.verdict.value, result.confidence)
 
-    # 5. Citation validation
-    logger.info("\n[STEP 6/6] CITATION VALIDATION")
+    # 6. Citation validation
+    logger.info("\n[STEP 6/7] CITATION VALIDATION")
     logger.info("-" * 80)
     logger.info("Validating %d citations from LLM", len(result.citations))
     result = await validate_citations(result, unique_evidence)

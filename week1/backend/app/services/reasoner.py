@@ -51,7 +51,8 @@ def assemble_context(evidence: list[EvidenceChunk]) -> str:
 # ---------------------------------------------------------------------------
 
 VERIFY_SYSTEM = """\
-You are a rigorous fact-checking assistant. Given a CLAIM and EVIDENCE, determine the verdict.
+You are a rigorous but resourceful fact-checking assistant. Given a CLAIM and EVIDENCE, \
+determine the verdict.
 
 INSTRUCTIONS:
 1. Analyze each piece of evidence for relevance to the claim.
@@ -59,6 +60,18 @@ INSTRUCTIONS:
 3. Consider the credibility and recency of each source.
 4. If the claim contains multiple parts, evaluate each separately.
 5. Determine a verdict: TRUE, FALSE, MISLEADING, or NOT_ENOUGH_EVIDENCE.
+
+IMPORTANT - MAKING A DETERMINATION:
+- TRY HARD to reach a TRUE, FALSE, or MISLEADING verdict. Use logical inference, \
+  cross-referencing, and contextual reasoning to bridge gaps in the evidence.
+- If evidence partially addresses the claim, use what's available and note limitations \
+  in your reasoning. Partial evidence is still useful.
+- Use MISLEADING when the claim is technically true but presented in a deceptive way, \
+  or when the truth is more nuanced than the claim suggests.
+- Only use NOT_ENOUGH_EVIDENCE as an absolute LAST RESORT when the evidence is \
+  completely unrelated to the claim topic and you cannot make any reasonable inference.
+- If you have evidence about the general topic but not the exact claim, still attempt \
+  a verdict with lower confidence (0.3-0.5) rather than giving up.
 
 RESPOND IN THIS EXACT JSON FORMAT (no markdown fences, just raw JSON):
 {
@@ -76,9 +89,9 @@ RESPOND IN THIS EXACT JSON FORMAT (no markdown fences, just raw JSON):
 CRITICAL RULES:
 - ONLY cite sources from the provided evidence. NEVER fabricate a source or URL.
 - The "relevant_quote" MUST be an exact substring from the evidence text.
-- If evidence is insufficient to determine truth, return verdict "NOT_ENOUGH_EVIDENCE".
-- Explain your reasoning transparently.
-- confidence must be a float between 0.0 and 1.0."""
+- Explain your reasoning transparently, including what evidence supports/contradicts the claim.
+- confidence must be a float between 0.0 and 1.0.
+- Lower confidence is FINE – a verdict with 0.4 confidence is more useful than NOT_ENOUGH_EVIDENCE."""
 
 
 async def verify_claim(
@@ -192,7 +205,14 @@ async def verify_claim(
 
 SUFFICIENCY_SYSTEM = """\
 You are an evidence-sufficiency evaluator. Given a claim and retrieved evidence passages, \
-determine whether the evidence is SUFFICIENT to verify or refute the claim.
+determine whether the evidence contains ANY relevant information that could help verify \
+or refute the claim.
+
+Be GENEROUS in your assessment:
+- If ANY evidence passage mentions the topic, entities, or events in the claim, that counts.
+- Even partial or indirect evidence is useful (e.g., evidence about related events, \
+  background context, or corroborating details).
+- Only say INSUFFICIENT if the evidence is completely unrelated to the claim topic.
 
 Reply with ONLY one word: "SUFFICIENT" or "INSUFFICIENT"."""
 
@@ -204,10 +224,11 @@ async def check_evidence_sufficiency(
     if not evidence:
         return False
 
-    context = "\n".join(f"- {e.text[:300]}" for e in evidence[:5])
+    # Use more context: top-8 chunks, 500 chars each
+    context = "\n".join(f"- {e.text[:500]}" for e in evidence[:8])
     client = _get_client()
 
-    logger.debug("Checking evidence sufficiency for claim")
+    logger.debug("Checking evidence sufficiency for claim (using top-%d chunks)", min(8, len(evidence)))
     resp = client.chat.completions.create(
         model=settings.fast_llm_model,
         messages=[
@@ -228,16 +249,24 @@ async def check_evidence_sufficiency(
 # ---------------------------------------------------------------------------
 
 REFORMULATE_SYSTEM = """\
-You are a search-query reformulation assistant. The original query did not return \
-sufficient evidence. Reformulate the query to find better evidence. \
-Return ONLY the new search query (one line, no explanation)."""
+You are a search-query reformulation expert. The original query did not return \
+sufficient evidence. Your job is to create a BETTER search query.
+
+Use these strategies:
+1. SIMPLIFY: Remove unnecessary words, keep only key entities and facts.
+2. BROADEN: If too specific, make it broader (e.g., "GDP growth India Q3 2024" → "India economic growth 2024").
+3. SYNONYMS: Try alternative names, terms, or phrasings people might use.
+4. ENTITY-FOCUSED: Focus on the main entity (person, company, country) + the key fact.
+5. DIFFERENT ANGLE: If searching for a claim about X, try searching for the context around X.
+
+Return ONLY the new search query (one line, no explanation). Make it concise and search-engine friendly."""
 
 
 async def reformulate_query(
     original_query: str, evidence: list[EvidenceChunk]
 ) -> str:
     """Reformulate a query based on what evidence was found (or not found)."""
-    context_summary = "; ".join(e.text[:100] for e in evidence[:3])
+    context_summary = "; ".join(e.text[:150] for e in evidence[:3]) if evidence else "No evidence found at all."
     client = _get_client()
 
     logger.debug("Reformulating query (original: '%s')", original_query[:80])
@@ -254,7 +283,7 @@ async def reformulate_query(
                 ),
             },
         ],
-        temperature=0.3,
+        temperature=0.4,
         max_tokens=128,
     )
     new_query = resp.choices[0].message.content.strip()
