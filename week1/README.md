@@ -6,21 +6,42 @@ A RAG-powered system that verifies news claims in real time. Highlight any text 
 
 ---
 
-## Architecture
+## Architecture (Backend Pipeline)
+
+The backend runs a 6-step pipeline orchestrated by `agent.py`. Steps 2-4 form the **core RAG pipeline** (Retrieval-Augmented Generation).
 
 ```
-User → Browser Extension → FastAPI Backend
-                            ├── Claim Extraction (GPT-4o-mini)
-                            ├── Claim Decomposition (GPT-4o-mini)
-                            ├── Hybrid Retrieval
-                            │   ├── ChromaDB (dense vector search)
-                            │   ├── BM25 (sparse keyword search)
-                            │   └── Tavily API (live web search)
-                            ├── Cross-Encoder Reranking
-                            ├── Agentic Loop (multi-round if insufficient)
-                            ├── LLM Verification (GPT-4o)
-                            └── Citation Validation
+POST /api/verify (raw text)
+│
+├── Step 1: Claim Extraction + Decomposition        [PRE-PROCESSING]
+│   └── GPT-4o-mini or heuristic fast-path
+│       Extracts core claim, splits into atomic sub-claims
+│
+├── Step 2: Evidence Retrieval                       [RAG: Retrieval]
+│   ├── Dense vector search (ChromaDB, top-20)
+│   ├── BM25 keyword search (in-memory, top-20)
+│   ├── Reciprocal Rank Fusion (k=60)
+│   ├── Cross-Encoder Reranking (ms-marco-MiniLM, top-5)
+│   ├── Sufficiency check (top_score > 0.5)
+│   └── Web fallback (Tavily API) + query reformulation (max 2 rounds)
+│
+├── Step 3: Evidence Consolidation                   [RAG: Augmentation]
+│   └── Deduplicate, filter, fallback search, sort by relevance
+│
+├── Step 4: LLM Reasoning + Verification             [RAG: Generation]
+│   └── GPT-4o-mini generates verdict + reasoning from top-5 evidence
+│   └── (4b) Web retry if NOT_ENOUGH_EVIDENCE and no web used
+│
+├── Step 5: Citation Validation                      [RAG: Guardrail]
+│   └── Fuzzy-match citations to evidence, filter hallucinated sources
+│
+└── Step 6: Feedback Loop                            [RAG: Self-Improvement]
+    └── Store verified claims back into ChromaDB for future queries
+│
+└── VerifyResponse JSON (verdict + confidence + reasoning + citations)
 ```
+
+For detailed architecture diagrams with full what/why/RAG annotations, see [detailed_architecture_diagrams](./detailed_architecture_diagrams_651683ff.plan.md).
 
 ## Quick Start
 
@@ -263,20 +284,25 @@ Expected result:
 | Component | Technology |
 |---|---|
 | Backend | FastAPI (Python 3.11+) |
-| LLM | GPT-4o / GPT-4o-mini (OpenAI) |
-| Embedding | text-embedding-3-small (OpenAI) |
-| Vector DB | ChromaDB (local, persistent) |
-| Reranker | cross-encoder/ms-marco-MiniLM-L-6-v2 |
-| Web Search | Tavily Search API |
+| LLM (reasoning + extraction) | GPT-4o-mini (OpenAI) |
+| Embedding | text-embedding-3-small (OpenAI, 1536 dims) |
+| Vector DB | ChromaDB (local, persistent, cosine similarity) |
+| Sparse Search | BM25 via rank-bm25 (in-memory index) |
+| Reranker | cross-encoder/ms-marco-MiniLM-L-6-v2 (sentence-transformers) |
+| Web Search | Tavily Search API (cached 1hr, rate-limited) |
+| Citation Validation | thefuzz (fuzzy string matching) |
 | Frontend | Chrome Extension (MV3) / Web App |
 
 ## RAG Design
 
-- **Chunking**: 512 tokens, 64-token overlap, recursive splitting
-- **Retrieval**: Hybrid (dense + BM25) with Reciprocal Rank Fusion
-- **Reranking**: Cross-encoder for deep relevance scoring
-- **Agentic loop**: Up to 3 retrieval rounds with query reformulation
-- **Citation validation**: Post-hoc fuzzy matching against retrieved evidence
+- **Chunking**: 2000-character chunks with 250-character overlap, paragraph-aware splitting (falls back to sentence boundaries)
+- **Retrieval (the R)**: Hybrid search -- dense vector (ChromaDB cosine similarity) + BM25 keyword match -- merged via Reciprocal Rank Fusion (k=60). Dense catches semantic meaning, BM25 catches exact terms
+- **Reranking**: Cross-encoder (`ms-marco-MiniLM-L-6-v2`) deeply scores each (query, passage) pair and keeps top-5
+- **Agentic loop**: Up to 2 retrieval rounds with GPT-4o-mini query reformulation when KB evidence is insufficient; web search via Tavily API as fallback
+- **Augmentation (the A)**: Evidence is deduplicated, filtered, and sorted by relevance; top-5 chunks (max 400 chars each) form the LLM context window
+- **Generation (the G)**: GPT-4o-mini generates a structured verdict (TRUE/FALSE/MISLEADING/NOT_ENOUGH_EVIDENCE) grounded in retrieved evidence, not parametric memory
+- **Citation validation**: Post-hoc fuzzy matching (`thefuzz` partial ratio, threshold 50) ensures every citation traces to real retrieved evidence; URLs validated for credibility >= 0.60
+- **Feedback loop**: Verified claims (confidence >= 0.3) are stored back into ChromaDB, making the knowledge base self-improving over time
 
 ## Evaluation
 
@@ -295,21 +321,22 @@ Reports: accuracy, citation rate, hallucination rate, latency (p50/p95).
 week1/
 ├── backend/
 │   ├── app/
-│   │   ├── main.py              # FastAPI application
-│   │   ├── config.py            # Settings from .env
-│   │   ├── models.py            # Pydantic models
+│   │   ├── main.py              # FastAPI entry point + startup preloading
+│   │   ├── config.py            # Settings from .env (models, thresholds, TTLs)
+│   │   ├── models.py            # Pydantic models (VerifyRequest/Response, EvidenceChunk, etc.)
 │   │   ├── services/
-│   │   │   ├── agent.py         # Agentic pipeline controller
-│   │   │   ├── claim_extractor.py
-│   │   │   ├── embedder.py      # OpenAI embeddings + ChromaDB
-│   │   │   ├── reasoner.py      # LLM verification logic
-│   │   │   ├── reranker.py      # Cross-encoder reranking
-│   │   │   ├── retriever.py     # Hybrid retrieval (dense + BM25)
-│   │   │   ├── web_search.py    # Tavily API integration
-│   │   │   └── citation_validator.py
+│   │   │   ├── agent.py         # Step 1-6 pipeline orchestrator
+│   │   │   ├── claim_extractor.py  # Step 1: extraction + decomposition
+│   │   │   ├── retriever.py     # Step 2: hybrid retrieval (dense + BM25 + RRF)
+│   │   │   ├── embedder.py      # Step 2: OpenAI embeddings + ChromaDB operations
+│   │   │   ├── reranker.py      # Step 2: cross-encoder reranking
+│   │   │   ├── web_search.py    # Step 2: Tavily API (cached, rate-limited)
+│   │   │   ├── reasoner.py      # Step 4: LLM verification + query reformulation
+│   │   │   ├── citation_validator.py  # Step 5: fuzzy matching + credibility filtering
+│   │   │   └── data_updater.py  # Data freshness: RSS/Wikipedia updates + TTL cleanup
 │   │   └── knowledge_base/
-│   │       ├── ingest.py        # KB ingestion pipeline
-│   │       └── sources.py       # Credibility scoring
+│   │       ├── ingest.py        # KB ingestion pipeline (chunk, embed, store)
+│   │       └── sources.py       # Source credibility scoring
 │   ├── requirements.txt
 │   └── .env.example
 ├── extension/                   # Chrome Extension (Manifest V3)
