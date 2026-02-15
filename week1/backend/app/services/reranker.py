@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Optional
 
 from app.config import settings
 from app.models import EvidenceChunk
 
 logger = logging.getLogger(__name__)
+
+
+def _sigmoid(x: float) -> float:
+    """Convert raw cross-encoder logit to a 0-1 probability."""
+    try:
+        return 1.0 / (1.0 + math.exp(-x))
+    except OverflowError:
+        return 0.0 if x < 0 else 1.0
 
 _model = None
 
@@ -65,12 +74,18 @@ async def rerank(
     pairs = [(query, c.text) for c in chunks]
     scores = model.predict(pairs)
 
-    scored = list(zip(chunks, scores))
+    # Normalise raw logits → 0-1 probabilities with sigmoid.
+    # ms-marco-MiniLM-L-6-v2 outputs raw logits in ~[-12, +12]; sigmoid
+    # maps 0 → 0.5 (decision boundary), giving downstream code a consistent
+    # 0-1 scale for sufficiency thresholds.
+    norm_scores = [_sigmoid(float(s)) for s in scores]
+
+    scored = list(zip(chunks, norm_scores))
     scored.sort(key=lambda x: x[1], reverse=True)
 
     result: list[EvidenceChunk] = []
     for chunk, score in scored[:k]:
-        chunk.relevance_score = float(score)
+        chunk.relevance_score = score
         result.append(chunk)
 
     logger.debug(

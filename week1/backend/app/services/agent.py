@@ -190,7 +190,7 @@ async def run_verification_pipeline(
         logger.info("       │  Rerank: %d chunks, top_score=%.3f  ⏱ %s",
                      len(reranked), top_score, _elapsed(t_rr))
 
-        kb_sufficient = top_score > 0.5 and len(reranked) >= 2
+        kb_sufficient = top_score > 0.3 and len(reranked) >= 2
         if kb_sufficient:
             logger.info("       │  ✓ KB sufficient — skipping web")
             per_sc_evidence[i] = reranked
