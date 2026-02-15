@@ -237,18 +237,24 @@ async def run_verification_pipeline(
     logger.info("  ⏱  %s", _elapsed(t0))
     logger.info("")
 
-    # De-duplicate + filter system entries
-    seen: set[str] = set()
+    # De-duplicate evidence using fuzzy matching to catch near-duplicates
+    # (e.g. same claim with different casing, punctuation, or minor wording)
+    from thefuzz import fuzz
+
     unique_evidence: list[EvidenceChunk] = []
-    system_filtered = 0
+    seen_texts: list[str] = []          # normalised texts of kept evidence
+    DEDUP_THRESHOLD = 80                 # fuzz ratio ≥ 80 → treat as duplicate
+
     for e in all_evidence:
-        if e.source_name == "Verified Claim (System)":
-            system_filtered += 1
-            continue
-        key = e.text[:200]
-        if key not in seen:
-            seen.add(key)
+        norm = e.text[:300].lower().strip()
+        is_dup = False
+        for existing in seen_texts:
+            if fuzz.ratio(norm, existing) >= DEDUP_THRESHOLD:
+                is_dup = True
+                break
+        if not is_dup:
             unique_evidence.append(e)
+            seen_texts.append(norm)
 
     # ──────────────────────────────────────────────────────────────────────
     #  STEP 3 — EVIDENCE CONSOLIDATION
@@ -259,7 +265,6 @@ async def run_verification_pipeline(
     logger.info("")
     t0 = time.time()
     logger.info("  Raw chunks collected   : %d", len(all_evidence))
-    logger.info("  System entries filtered : %d", system_filtered)
     logger.info("  Unique after dedup     : %d", len(unique_evidence))
     logger.info("  Retrieval rounds total : %d", total_rounds)
 

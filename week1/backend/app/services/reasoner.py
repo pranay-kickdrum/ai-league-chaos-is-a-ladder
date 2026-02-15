@@ -36,7 +36,7 @@ def _get_client() -> AsyncOpenAI:
 # Context assembly
 # ---------------------------------------------------------------------------
 
-MAX_EVIDENCE_FOR_LLM = 5       # send at most this many chunks
+MAX_EVIDENCE_FOR_LLM = 5      # send at most this many chunks
 MAX_CHUNK_CHARS = 400          # truncate each chunk to this length
 
 
@@ -46,15 +46,16 @@ def assemble_context(evidence: list[EvidenceChunk]) -> str:
     Keeps only the top-N most relevant chunks and truncates each to stay
     within a reasonable token budget so the LLM responds faster.
     Includes relevance scores so the LLM can judge which evidence to trust.
+    URLs are NOT shown to the LLM -- citations are built programmatically.
     """
     top = evidence[:MAX_EVIDENCE_FOR_LLM]
     parts: list[str] = []
     for i, e in enumerate(top, 1):
         text = e.text[:MAX_CHUNK_CHARS] + ("..." if len(e.text) > MAX_CHUNK_CHARS else "")
         parts.append(
-            f"[Source {i}] (relevance: {e.relevance_score:.2f}): {text}\n"
-            f"  (from: {e.source_name}, date: {e.publish_date}, "
-            f"url: {e.source_url}, credibility: {e.credibility_score:.2f})"
+            f"[Source {i}] (relevance: {e.relevance_score:.2f}, "
+            f"credibility: {e.credibility_score:.2f}): {text}\n"
+            f"  (from: {e.source_name}, date: {e.publish_date})"
         )
     return "\n\n".join(parts)
 
@@ -68,7 +69,7 @@ Fact-checker. Given CLAIM + EVIDENCE, return a JSON verdict. Be concise.
 
 IMPORTANT: Some evidence may be IRRELEVANT to the claim (retrieved from a general database). \
 IGNORE any evidence that is not directly about the specific claim topic. \
-Each evidence has a "relevance" score (0-1). Evidence below 0.3 relevance is likely unrelated.
+Each evidence has a "relevance" score — lower scores are less likely to be relevant.
 
 VERDICTS: TRUE, FALSE, MISLEADING, NOT_ENOUGH_EVIDENCE (last resort only).
 Use partial evidence with lower confidence rather than NOT_ENOUGH_EVIDENCE.
@@ -77,41 +78,69 @@ JSON FORMAT (raw JSON, no markdown fences):
 {
   "sub_claims": [
     {"text": "sub-claim", "verdict": "TRUE|FALSE|MISLEADING|NOT_ENOUGH_EVIDENCE",
-     "support": [{"name": "Source", "url": "url", "summary": "1 sentence"}],
-     "contradict": []}
+     "support": [1, 3],
+     "contradict": [2]}
   ],
   "verdict": "TRUE|FALSE|MISLEADING|NOT_ENOUGH_EVIDENCE",
   "confidence": 0.85,
   "reasoning": "2-3 sentences max.",
-  "citations": [
-    {"source_name": "Name", "url": "url", "relevant_quote": "short quote", "for_sub_claim": "sub-claim text"}
-  ]
+  "relevant_sources": [1, 3, 5]
 }
 
-CITATION RULES:
-- Citations MUST be directly about the claim topic. NEVER cite unrelated evidence.
-- If an evidence source has a specific url, use it — but ONLY if the evidence is relevant.
-- If no relevant evidence has urls, provide full https:// URLs from your knowledge \
-  to authoritative pages ABOUT THIS SPECIFIC CLAIM (e.g. the Wikipedia page for the \
-  person/event/topic in the claim, or a news article about it).
-- ALWAYS use full URLs starting with https://. NEVER use plain text like "Wikipedia".
-- NO DUPLICATE URLs. Each URL appears ONCE.
-- Provide 1-3 UNIQUE, RELEVANT citations. Every citation MUST have a url.
-- "relevant_quote" must be from evidence that is ACTUALLY about the claim. Max 50 chars.
+RULES:
+- "support" and "contradict" are arrays of Source NUMBERS (e.g. 1, 2, 3) from the evidence.
+- "relevant_sources" lists ALL Source numbers that are relevant to the claim (used for citation).
+- Do NOT output URLs. Citations are built separately from evidence metadata.
 - "reasoning" must be 2-3 sentences, not longer.
 - confidence: float 0.0-1.0."""
 
 
-def _parse_source(raw_src) -> SubClaimSource:
-    """Parse a source entry from the LLM output – handles both string and dict forms."""
-    if isinstance(raw_src, dict):
+def _source_ref_to_subclaim_source(
+    idx: int, evidence: list[EvidenceChunk],
+) -> SubClaimSource | None:
+    """Convert a 1-based source index from the LLM into a SubClaimSource."""
+    pos = idx - 1  # LLM uses 1-based indices
+    if 0 <= pos < len(evidence):
+        e = evidence[pos]
         return SubClaimSource(
-            name=raw_src.get("name", "Unknown"),
-            url=raw_src.get("url", ""),
-            summary=raw_src.get("summary", ""),
+            name=e.source_name,
+            url=e.source_url,
+            summary=e.text[:120],
         )
-    # Fallback: plain string (old format)
-    return SubClaimSource(name=str(raw_src), url="", summary=str(raw_src))
+    return None
+
+
+def _build_citations_from_evidence(
+    relevant_indices: list[int],
+    evidence: list[EvidenceChunk],
+) -> list[Citation]:
+    """Build Citation objects from evidence chunks the LLM flagged as relevant.
+
+    ONLY evidence that the LLM explicitly listed in ``relevant_sources`` is
+    cited — this prevents unrelated DB evidence (e.g. a Trump/Biden claim
+    appearing as a citation for a Lata/Asha query) from leaking through.
+    Deduplicates by URL.
+    """
+    seen_urls: set[str] = set()
+    citations: list[Citation] = []
+    top = evidence[:MAX_EVIDENCE_FOR_LLM]
+
+    for idx in relevant_indices:
+        pos = idx - 1
+        if 0 <= pos < len(top):
+            e = top[pos]
+            url = e.source_url
+            if url and url not in seen_urls:
+                seen_urls.add(url)
+                citations.append(Citation(
+                    source_name=e.source_name,
+                    url=url,
+                    relevant_quote=e.text[:200].strip(),
+                    credibility_score=e.credibility_score,
+                    retrieval_method=e.retrieval_method,
+                ))
+
+    return citations
 
 
 async def verify_claim(
@@ -119,7 +148,13 @@ async def verify_claim(
     sub_claims: list[str],
     evidence: list[EvidenceChunk],
 ) -> VerifyResponse:
-    """Run the LLM verification reasoning and return a structured VerifyResponse."""
+    """Run the LLM verification reasoning and return a structured VerifyResponse.
+
+    The LLM only outputs verdict / confidence / reasoning / sub-claims
+    (referencing evidence by source number). Citations are built
+    programmatically from the evidence chunks — no URLs ever pass through
+    the LLM.
+    """
     used_count = min(len(evidence), MAX_EVIDENCE_FOR_LLM)
     logger.info("  Assembling context: %d/%d evidence chunks, %d chars/chunk max",
                 used_count, len(evidence), MAX_CHUNK_CHARS)
@@ -139,7 +174,7 @@ async def verify_claim(
             {"role": "user", "content": user_msg},
         ],
         temperature=0.0,
-        max_tokens=512,
+        max_tokens=1024,
     )
     llm_ms = (time.time() - t_llm) * 1000
 
@@ -181,16 +216,27 @@ async def verify_claim(
     }
     verdict = verdict_map.get(llm_out.verdict.upper(), Verdict.NOT_ENOUGH_EVIDENCE)
 
-    # Build sub-claim results with structured sources
+    # Build sub-claim results — support/contradict are now source numbers
+    top_evidence = evidence[:MAX_EVIDENCE_FOR_LLM]
     sub_results: list[SubClaimResult] = []
     for sc in llm_out.sub_claims:
         raw_support = sc.get("support", [])
         raw_contradict = sc.get("contradict", [])
 
-        supporting = [_parse_source(s) for s in raw_support]
-        contradicting = [_parse_source(s) for s in raw_contradict]
+        supporting: list[SubClaimSource] = []
+        for ref in raw_support:
+            if isinstance(ref, int):
+                src = _source_ref_to_subclaim_source(ref, top_evidence)
+                if src:
+                    supporting.append(src)
 
-        # Build evidence summary from support sources
+        contradicting: list[SubClaimSource] = []
+        for ref in raw_contradict:
+            if isinstance(ref, int):
+                src = _source_ref_to_subclaim_source(ref, top_evidence)
+                if src:
+                    contradicting.append(src)
+
         summary_parts = [s.summary or s.name for s in supporting]
         evidence_summary = "; ".join(summary_parts)
 
@@ -206,18 +252,12 @@ async def verify_claim(
             )
         )
 
-    # Build citations
-    citations: list[Citation] = []
-    for c in llm_out.citations:
-        citations.append(
-            Citation(
-                source_name=c.get("source_name", "Unknown"),
-                url=c.get("url", ""),
-                relevant_quote=c.get("relevant_quote", ""),
-                credibility_score=0.0,
-                retrieval_method="unknown",
-            )
-        )
+    # Build citations directly from evidence chunks (NOT from LLM output)
+    citations = _build_citations_from_evidence(
+        llm_out.relevant_sources, top_evidence,
+    )
+    logger.info("  Built %d citations from evidence (LLM flagged %d relevant sources)",
+                len(citations), len(llm_out.relevant_sources))
 
     return VerifyResponse(
         claim=claim,

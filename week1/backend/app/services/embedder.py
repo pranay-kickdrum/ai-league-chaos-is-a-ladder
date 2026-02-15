@@ -285,13 +285,13 @@ def store_verified_claim(
         existing = collection.get(ids=[claim_id], include=["metadatas"])
         if existing and existing.get("ids") and len(existing["ids"]) > 0:
             old_meta = existing["metadatas"][0] if existing.get("metadatas") else {}
-            if old_meta.get("citation_urls"):
-                logger.info("  ✓ Claim already exists in KB with citations (id=%s) – skipping", claim_id)
+            if old_meta.get("source_url") and old_meta.get("citation_urls"):
+                logger.info("  ✓ Claim already exists in KB with URL + citations (id=%s) – skipping", claim_id)
                 logger.info("-" * 60)
                 return
             else:
-                # Old entry is missing citation_urls – delete and re-store with updated metadata
-                logger.info("  ↻ Claim exists but missing citation_urls – updating (id=%s)", claim_id)
+                # Old entry is missing source_url or citation_urls – delete and re-store
+                logger.info("  ↻ Claim exists but missing source_url/citation_urls – updating (id=%s)", claim_id)
                 collection.delete(ids=[claim_id])
     except Exception:
         pass  # ID not found, proceed to store
@@ -302,34 +302,63 @@ def store_verified_claim(
     ids_to_store: list[str] = []
     metas_to_store: list[dict] = []
 
-    # 1. Store the claim + verdict as a document
+    # 1. Store the claim + verdict as a concise document
+    #    Build a human-readable one-liner with source attribution
+    import json as _json
+
+    # Collect ALL available URLs from both citations AND evidence chunks.
+    # Citations may have empty URLs (stripped by validator to prevent
+    # hallucinated links), but the evidence chunks still carry the real URLs.
+    all_url_entries: list[dict] = []   # [{source_name, url}, ...]
+    primary_url = ""
+    source_names: list[str] = []
+
+    # First pass: citation URLs
+    for c in citations:
+        c_url = c.get("url", "")
+        c_name = c.get("source_name", "")
+        if c_url:
+            all_url_entries.append({"source_name": c_name, "url": c_url})
+            if not primary_url:
+                primary_url = c_url
+            if c_name and c_name not in source_names:
+                source_names.append(c_name)
+
+    # Second pass: evidence chunk URLs (web evidence has real URLs)
+    for chunk in evidence_chunks:
+        e_url = chunk.get("source_url", "")
+        e_name = chunk.get("source_name", "")
+        if e_url and e_url not in {e["url"] for e in all_url_entries}:
+            all_url_entries.append({"source_name": e_name, "url": e_url})
+            if not primary_url:
+                primary_url = e_url
+            if e_name and e_name not in source_names:
+                source_names.append(e_name)
+
+    sources_text = ", ".join(source_names[:3]) if source_names else "internal analysis"
     claim_doc = (
-        f"Verified Claim: {claim}\n"
-        f"Verdict: {verdict}\n"
-        f"Confidence: {confidence:.2f}\n"
-        f"Reasoning: {reasoning}"
+        f"Previously verified claim: \"{claim}\" → {verdict} "
+        f"({confidence:.0%} confidence). "
+        f"Sources: {sources_text}. "
+        f"Reasoning: {reasoning[:200]}"
     )
 
-    # Build a JSON string of citation URLs for cache retrieval later
-    import json as _json
-    citation_urls = _json.dumps([
-        {"source_name": c.get("source_name", ""), "url": c.get("url", "")}
-        for c in citations if c.get("url")
-    ])
+    # Store all collected URLs for retrieval as citations next time
+    citation_urls = _json.dumps(all_url_entries)
 
     texts_to_store.append(claim_doc)
     ids_to_store.append(claim_id)
     metas_to_store.append({
         "source_name": "Verified Claim (System)",
-        "source_url": "",
+        "source_url": primary_url,           # ← real URL for direct citation pickup
         "category": "verified_claim",
         "publish_date": timestamp,
         "credibility_score": min(0.95, confidence),
         "verdict": verdict,
         "confidence": confidence,
         "doc_type": "verified_claim",
-        "citation_urls": citation_urls,  # JSON array of {source_name, url}
-        "reasoning": reasoning[:500],    # truncated for metadata size limits
+        "citation_urls": citation_urls,       # JSON array of {source_name, url}
+        "reasoning": reasoning[:500],
     })
 
     # 2. Store web evidence chunks that aren't already in KB

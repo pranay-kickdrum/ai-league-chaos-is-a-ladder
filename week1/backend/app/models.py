@@ -92,4 +92,6 @@ class LLMVerificationOutput(BaseModel):
     verdict: str = "NOT_ENOUGH_EVIDENCE"
     confidence: float = 0.0
     reasoning: str = ""
+    relevant_sources: list[int] = Field(default_factory=list)
+    # Legacy field – ignored but accepted so old cached responses don't break parsing
     citations: list[dict] = Field(default_factory=list)

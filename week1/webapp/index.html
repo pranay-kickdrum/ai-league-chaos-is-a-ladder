@@ -197,7 +197,7 @@
     }
 
     .citation {
-      padding: 8px 0;
+      padding: 10px 0;
       border-bottom: 1px solid #334155;
       font-size: 13px;
     }
@@ -207,9 +207,32 @@
     .citation a { color: var(--blue); text-decoration: none; word-break: break-all; }
     .citation a:hover { text-decoration: underline; }
 
+    .citation-source-line {
+      display: flex;
+      align-items: baseline;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+
+    .citation-cred {
+      font-size: 11px;
+      color: var(--text-dim);
+      background: rgba(99,102,241,0.12);
+      padding: 2px 7px;
+      border-radius: 8px;
+    }
+
     .citation-quote {
-      display: block; margin-top: 4px;
-      color: var(--text-dim); font-style: italic; font-size: 12px;
+      display: block;
+      margin-top: 6px;
+      padding: 8px 12px;
+      background: rgba(255,255,255,0.04);
+      border-left: 3px solid var(--accent);
+      border-radius: 4px;
+      color: var(--text-dim);
+      font-style: italic;
+      font-size: 12px;
+      line-height: 1.5;
     }
 
     .meta-row {
@@ -340,44 +363,11 @@
         const scList = document.getElementById("subClaimsList");
         if (r.sub_claims && r.sub_claims.length) {
           scCard.style.display = "block";
-          scList.innerHTML = r.sub_claims.map(sc => {
-            let sourcesHtml = "";
-
-            // Supporting sources
-            if (sc.supporting_sources && sc.supporting_sources.length) {
-              sourcesHtml += '<div class="sub-claim-source-label">Supporting:</div>';
-              sourcesHtml += sc.supporting_sources.map(s => {
-                if (typeof s === "object" && s.name) {
-                  const link = s.url ? `<a href="${escapeHtml(s.url)}" target="_blank">${escapeHtml(s.name)}</a>` : escapeHtml(s.name);
-                  const summary = s.summary ? ` – ${escapeHtml(s.summary)}` : "";
-                  return `<div class="sub-claim-source-item">✓ ${link}${summary}</div>`;
-                }
-                return `<div class="sub-claim-source-item">✓ ${escapeHtml(String(s))}</div>`;
-              }).join("");
-            }
-
-            // Contradicting sources
-            if (sc.contradicting_sources && sc.contradicting_sources.length) {
-              sourcesHtml += '<div class="sub-claim-source-label">Contradicting:</div>';
-              sourcesHtml += sc.contradicting_sources.map(s => {
-                if (typeof s === "object" && s.name) {
-                  const link = s.url ? `<a href="${escapeHtml(s.url)}" target="_blank">${escapeHtml(s.name)}</a>` : escapeHtml(s.name);
-                  const summary = s.summary ? ` – ${escapeHtml(s.summary)}` : "";
-                  return `<div class="sub-claim-source-item">✗ ${link}${summary}</div>`;
-                }
-                return `<div class="sub-claim-source-item">✗ ${escapeHtml(String(s))}</div>`;
-              }).join("");
-            }
-
-            const sourcesBlock = sourcesHtml ? `<div class="sub-claim-sources">${sourcesHtml}</div>` : "";
-
-            return `
-              <div class="sub-claim">
-                <strong>[${escapeHtml(sc.verdict)}]</strong> ${escapeHtml(sc.text)}
-                ${sourcesBlock}
-              </div>
-            `;
-          }).join("");
+          scList.innerHTML = r.sub_claims.map(sc => `
+            <div class="sub-claim">
+              <strong>[${escapeHtml(sc.verdict)}]</strong> ${escapeHtml(sc.text)}
+            </div>
+          `).join("");
         } else {
           scCard.style.display = "none";
         }
@@ -389,10 +379,12 @@
           cCard.style.display = "block";
           cList.innerHTML = r.citations.map(c => `
             <div class="citation">
-              <strong>${escapeHtml(c.source_name)}</strong>
-              (${Math.round((c.credibility_score || 0) * 100)}% cred.)
-              ${c.url ? `<br><a href="${escapeHtml(c.url)}" target="_blank">${escapeHtml(c.url)}</a>` : ""}
-              ${c.relevant_quote ? `<span class="citation-quote">"${escapeHtml(c.relevant_quote.substring(0, 250))}"</span>` : ""}
+              <div class="citation-source-line">
+                <strong>${escapeHtml(c.source_name)}</strong>
+                <span class="citation-cred">${Math.round((c.credibility_score || 0) * 100)}% cred.</span>
+              </div>
+              ${c.url ? `<a href="${escapeHtml(c.url)}" target="_blank">${escapeHtml(c.url)}</a>` : ""}
+              ${c.relevant_quote ? `<span class="citation-quote">"${escapeHtml(c.relevant_quote.substring(0, 300))}"</span>` : ""}
             </div>
           `).join("");
         } else {

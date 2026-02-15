@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json as _json
 import logging
 from typing import Optional
 
@@ -13,6 +14,42 @@ from app.services.embedder import batch_query_collection, embed_query, get_colle
 from app.knowledge_base.sources import score_source
 
 logger = logging.getLogger(__name__)
+
+
+def _resolve_source_url(meta: dict) -> str:
+    """Return the best available URL for an evidence chunk.
+
+    For regular web evidence, ``source_url`` is already set.
+    For *Verified Claim (System)* entries, ``source_url`` is empty but the
+    real citation URLs are stored in the ``citation_urls`` metadata field
+    (a JSON-encoded list of ``{source_name, url}`` dicts).  We extract the
+    first valid URL from that list so it can be surfaced to the LLM and the
+    user.
+    """
+    url = meta.get("source_url", "")
+    if url:
+        return url
+
+    # Fallback: extract from citation_urls (verified-claim entries)
+    raw = meta.get("citation_urls", "")
+    if raw:
+        try:
+            entries = _json.loads(raw) if isinstance(raw, str) else raw
+            for entry in entries:
+                if isinstance(entry, dict) and entry.get("url"):
+                    return entry["url"]
+        except (ValueError, TypeError):
+            pass
+    return ""
+
+
+def _resolve_source_name(meta: dict) -> str:
+    """Return a descriptive display name for an evidence source.
+
+    The credibility score is NOT embedded in the name — the frontend
+    renders it separately as a badge to avoid duplication.
+    """
+    return meta.get("source_name", "Unknown")
 
 
 # ---------------------------------------------------------------------------
@@ -195,11 +232,11 @@ async def hybrid_retrieve(
     chunks: list[EvidenceChunk] = []
     for doc in merged:
         meta = doc.get("metadata", {})
-        url = meta.get("source_url", "")
+        url = _resolve_source_url(meta)
         chunks.append(
             EvidenceChunk(
                 text=doc["text"],
-                source_name=meta.get("source_name", "Unknown"),
+                source_name=_resolve_source_name(meta),
                 source_url=url,
                 publish_date=meta.get("publish_date", "unknown"),
                 category=meta.get("category", "unknown"),
@@ -273,11 +310,11 @@ async def batch_hybrid_retrieve(
         chunks: list[EvidenceChunk] = []
         for doc in merged:
             meta = doc.get("metadata", {})
-            url = meta.get("source_url", "")
+            url = _resolve_source_url(meta)
             chunks.append(
                 EvidenceChunk(
                     text=doc["text"],
-                    source_name=meta.get("source_name", "Unknown"),
+                    source_name=_resolve_source_name(meta),
                     source_url=url,
                     publish_date=meta.get("publish_date", "unknown"),
                     category=meta.get("category", "unknown"),
