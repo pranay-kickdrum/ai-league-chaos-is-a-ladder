@@ -205,7 +205,7 @@ python -c "from app.services.data_updater import cleanup_expired_documents; prin
 
 - Full guide: [DATA_UPDATE_GUIDE.md](./DATA_UPDATE_GUIDE.md)
 - Main README: [README.md](./README.md)
-- Architecture: [claim_verification_system_6b4d7de6.plan.md](./claim_verification_system_6b4d7de6.plan.md)
+- Architecture: [DETAILED_BACKEND_FLOW.md](./DETAILED_BACKEND_FLOW.md)
 
 ---
 

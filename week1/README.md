@@ -41,7 +41,7 @@ POST /api/verify (raw text)
 └── VerifyResponse JSON (verdict + confidence + reasoning + citations)
 ```
 
-For detailed architecture diagrams with full what/why/RAG annotations, see [detailed_architecture_diagrams](./detailed_architecture_diagrams_651683ff.plan.md).
+For detailed architecture diagrams, see [DETAILED_BACKEND_FLOW.md](./DETAILED_BACKEND_FLOW.md). For technical explanations of each component, see [TECHNICAL_EXPLANATION.md](./TECHNICAL_EXPLANATION.md).
 
 ## Quick Start
 
