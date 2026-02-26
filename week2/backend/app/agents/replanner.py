@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 settings = get_settings()
 
 
-async def _interpret_change_request(change_text: str, itinerary: dict) -> dict:
+async def _interpret_change_request(change_text: str, itinerary: dict, current_request: dict) -> dict:
     """Use GPT-4o to interpret what the user wants to change."""
     llm = ChatOpenAI(
         model=settings.LLM_MODEL_REASONING,
@@ -31,25 +31,43 @@ async def _interpret_change_request(change_text: str, itinerary: dict) -> dict:
 
     prompt = f"""Analyze this traveler's change request and determine what needs to be modified in their itinerary.
 
+Current trip request:
+- Destination: {current_request.get('destination', 'N/A')}
+- Origin: {current_request.get('origin', 'N/A')}
+- Duration: {current_request.get('duration_days', 'N/A')} days
+- Budget: {current_request.get('budget', 'N/A')} {current_request.get('currency', 'INR')}
+- Travelers: {current_request.get('traveler_count', 1)}
+- Start date: {current_request.get('start_date', 'N/A')}
+
 Current itinerary:
 {chr(10).join(days_summary)}
 
 Selected hotel: {itinerary.get('selected_hotel', {}).get('name', 'N/A')}
-Selected flight: {itinerary.get('selected_flight', {}).get('airline', 'N/A')}
+Selected transport: {itinerary.get('selected_flight', {}).get('airline_or_operator', 'N/A')} ({itinerary.get('selected_flight', {}).get('mode', 'flight')})
 
 Change request: "{change_text}"
 
 Return a JSON object with:
 {{
   "affected_days": [1, 2],       // which day numbers need changes (empty = all)
-  "change_type": "swap_activity|change_hotel|change_flight|extend_trip|shorten_trip|reschedule|other",
+  "change_type": "swap_activity|change_hotel|change_flight|extend_trip|shorten_trip|change_budget|change_destination|reschedule|other",
   "needs_re_research": true/false,  // does this need fresh API calls?
+  "request_modifications": {{
+    "duration_days": null,        // new duration if changed, otherwise null
+    "budget": null,               // new budget amount if changed, otherwise null
+    "destination": null,          // new destination if changed, otherwise null
+    "origin": null,               // new origin if changed, otherwise null
+    "start_date": null,           // new start date (YYYY-MM-DD) if changed, otherwise null
+    "traveler_count": null        // new traveler count if changed, otherwise null
+  }},
   "specific_changes": [
     {{"day": 1, "remove": "Activity Name", "add_preference": "something relaxing"}},
   ],
   "reasoning": "Explanation of what we need to change and why"
 }}
 
+IMPORTANT: If the user wants to shorten or extend the trip, set change_type to "shorten_trip" or "extend_trip" and set request_modifications.duration_days to the new number.
+If the user mentions budget/cost concerns, set appropriate request_modifications.
 Return ONLY the JSON object."""
 
     try:
@@ -84,11 +102,15 @@ def _compute_delta(change_analysis: dict, itinerary: dict) -> dict:
         delta["hotel_change"] = True
         delta["re_research_needed"] = True
 
-    elif change_type == "change_flight":
+    elif change_type in ("change_flight", "change_transport"):
         delta["flight_change"] = True
         delta["re_research_needed"] = True
 
     elif change_type in ("extend_trip", "shorten_trip"):
+        delta["re_research_needed"] = True
+        delta["days_to_replan"] = list(range(1, len(itinerary.get("days", [])) + 1))
+
+    elif change_type in ("change_budget", "change_destination"):
         delta["re_research_needed"] = True
         delta["days_to_replan"] = list(range(1, len(itinerary.get("days", [])) + 1))
 
@@ -112,7 +134,10 @@ async def replan(state: TripState) -> TripState:
     trip_id = state.get("trip_id", "")
     request = state.get("request")
     if isinstance(request, dict):
+        request_dict = request
         request = TripRequest(**request)
+    else:
+        request_dict = request.model_dump(mode="json") if hasattr(request, "model_dump") else {}
 
     itinerary = state.get("itinerary", {})
     replan_request = state.get("replan_request", "")
@@ -122,8 +147,8 @@ async def replan(state: TripState) -> TripState:
     await sse_manager.emit_phase_update(trip_id, "replanning", "starting", "Analyzing your changes...")
     await sse_manager.emit_agent_thinking(trip_id, "replanner", f"Understanding: \"{replan_request}\"")
 
-    # Step 1: LLM interprets the change
-    change_analysis = await _interpret_change_request(replan_request, itinerary)
+    # Step 1: LLM interprets the change (with full request context)
+    change_analysis = await _interpret_change_request(replan_request, itinerary, request_dict)
 
     await sse_manager.emit_agent_thinking(
         trip_id, "replanner",
@@ -132,10 +157,40 @@ async def replan(state: TripState) -> TripState:
         f"Reasoning: {change_analysis.get('reasoning', '')}"
     )
 
-    # Step 2: Heuristic delta computation
+    # Step 2: Apply request modifications (duration, budget, destination, etc.)
+    request_mods = change_analysis.get("request_modifications", {})
+    if request_mods and isinstance(request_mods, dict):
+        updated_request = request_dict.copy() if isinstance(request_dict, dict) else {}
+        modified_fields = []
+        for field, value in request_mods.items():
+            if value is not None and field in updated_request:
+                old_val = updated_request[field]
+                updated_request[field] = value
+                modified_fields.append(f"{field}: {old_val} → {value}")
+
+        if modified_fields:
+            # Update end_date if duration changed and start_date exists
+            if "duration_days" in request_mods and request_mods["duration_days"] is not None:
+                start_date = updated_request.get("start_date")
+                if start_date:
+                    from datetime import date, timedelta
+                    if isinstance(start_date, str):
+                        start_date = date.fromisoformat(start_date)
+                    new_end = start_date + timedelta(days=int(request_mods["duration_days"]))
+                    updated_request["end_date"] = str(new_end)
+                    modified_fields.append(f"end_date: auto-adjusted to {new_end}")
+
+            state["request"] = updated_request
+            logger.info("Replanner updated request: %s", ", ".join(modified_fields))
+            await sse_manager.emit_agent_thinking(
+                trip_id, "replanner",
+                f"Updated trip parameters: {', '.join(modified_fields)}"
+            )
+
+    # Step 3: Heuristic delta computation
     delta = _compute_delta(change_analysis, itinerary)
 
-    # Step 3: Apply removals
+    # Step 4: Apply removals
     if isinstance(itinerary, dict) and delta["activities_to_remove"]:
         for removal in delta["activities_to_remove"]:
             day_num = removal.get("day")
@@ -149,6 +204,10 @@ async def replan(state: TripState) -> TripState:
 
     state["replan_delta"] = delta
     state["replan_analysis"] = change_analysis
+
+    # Clear stale checkpoint decisions so checkpoints re-trigger on replan
+    state["checkpoint_decision"] = {}
+    state["last_checkpoint"] = ""
 
     # Signal what needs to happen next (graph routing will use these flags)
     if delta["re_research_needed"]:

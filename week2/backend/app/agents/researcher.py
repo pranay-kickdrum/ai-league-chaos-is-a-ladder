@@ -79,7 +79,7 @@ async def research(state: TripState) -> TripState:
         request = TripRequest(**request)
 
     # Clear replan_delta so the router won't re-trigger replan routing
-    state.pop("replan_delta", None)
+    state["replan_delta"] = {}
 
     state["status"] = TripStatus.RESEARCHING
 
@@ -213,24 +213,28 @@ async def research(state: TripState) -> TripState:
         return_exceptions=True,
     )
 
+    # Helper: convert Pydantic models to dicts for clean JSON serialization
+    def _to_dicts(items: list) -> list:
+        return [item.model_dump() if hasattr(item, "model_dump") else item for item in items]
+
     # Process results
     if not isinstance(results[0], Exception):
-        research_results["flights"] = results[0]
+        research_results["flights"] = _to_dicts(results[0])
     else:
         logger.error("Flight search failed: %s", results[0])
 
     if not isinstance(results[1], Exception):
-        research_results["trains"] = results[1]
+        research_results["trains"] = _to_dicts(results[1])
     else:
         logger.error("Train search failed: %s", results[1])
 
     if not isinstance(results[2], Exception):
-        research_results["buses"] = results[2]
+        research_results["buses"] = _to_dicts(results[2])
     else:
         logger.error("Bus search failed: %s", results[2])
 
     if not isinstance(results[3], Exception):
-        research_results["hotels"] = results[3]
+        research_results["hotels"] = _to_dicts(results[3])
     else:
         logger.error("Hotel search failed: %s", results[3])
 

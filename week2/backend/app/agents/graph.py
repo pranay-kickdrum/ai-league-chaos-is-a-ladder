@@ -28,16 +28,7 @@ async def _router(state: TripState) -> TripState:
 def _route_entry(state: TripState) -> str:
     """Decide where to start based on checkpoint state (fresh start vs resume)."""
 
-    # If replan already ran (called directly by /replan endpoint), route based on delta
-    replan_delta = state.get("replan_delta")
-    if replan_delta and isinstance(replan_delta, dict):
-        # Clear so we don't re-trigger on subsequent passes
-        if replan_delta.get("re_research_needed"):
-            logger.info("Router: replan delta requires re-research → do_research")
-            return "do_research"
-        logger.info("Router: replan delta → plan")
-        return "plan"
-
+    # Check for checkpoint decision first (user responded to a checkpoint prompt)
     last_cp = state.get("last_checkpoint", "")
     decision = state.get("checkpoint_decision", {})
     if isinstance(decision, dict):
@@ -50,37 +41,50 @@ def _route_entry(state: TripState) -> str:
     # Use the decision's checkpoint if present, fallback to last_checkpoint
     cp = decision_cp or last_cp
 
+    # If we have a checkpoint decision, handle it (this means the graph was resumed after
+    # the user responded to a checkpoint prompt, NOT from a replan)
+    if cp and action:
+        logger.info("Resuming from checkpoint %s with action %s", cp, action)
+
+        if cp == "cp1":
+            if action == "cancel":
+                return END
+            if action == "regenerate":
+                return "plan"
+            if action == "adjust_preferences":
+                return "do_research"
+            # Default: approved plan → proceed to CP2
+            return "checkpoint_2"
+
+        if cp == "cp2":
+            if action == "cancel":
+                return END
+            if action == "request_changes":
+                return "replan"
+            # Default: approved budget → proceed to verify
+            return "verify"
+
+        if cp == "cp3":
+            if action == "cancel":
+                return END
+            if action == "request_changes":
+                return "replan"
+            # Default: confirmed booking → finalize
+            return "finalize"
+
+    # If replan ran (called directly by /replan endpoint), route based on delta
+    replan_delta = state.get("replan_delta")
+    if replan_delta and isinstance(replan_delta, dict) and replan_delta.get("change_type"):
+        # Clear so we don't re-trigger on subsequent passes
+        if replan_delta.get("re_research_needed"):
+            logger.info("Router: replan delta requires re-research → do_research")
+            return "do_research"
+        logger.info("Router: replan delta → plan")
+        return "plan"
+
     if not cp:
         # Fresh start — run full pipeline
         return "do_research"
-
-    logger.info("Resuming from checkpoint %s with action %s", cp, action)
-
-    if cp == "cp1":
-        if action == "cancel":
-            return END
-        if action == "regenerate":
-            return "plan"
-        if action == "adjust_preferences":
-            return "do_research"
-        # Default: approved plan → proceed to CP2
-        return "checkpoint_2"
-
-    if cp == "cp2":
-        if action == "cancel":
-            return END
-        if action == "request_changes":
-            return "replan"
-        # Default: approved budget → proceed to verify
-        return "verify"
-
-    if cp == "cp3":
-        if action == "cancel":
-            return END
-        if action == "request_changes":
-            return "replan"
-        # Default: confirmed booking → finalize
-        return "finalize"
 
     # Unknown checkpoint — start fresh
     return "do_research"

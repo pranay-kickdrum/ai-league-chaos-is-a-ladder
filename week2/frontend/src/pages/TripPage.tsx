@@ -65,8 +65,8 @@ export default function TripPage({ tripId: initialTripId, onBack }: TripPageProp
               `Great! Planning a ${res.request.duration_days}-day trip to ${res.request.destination}. Let me research the best options for you...`
             );
           }
-        } else if (state.pending_replan) {
-          // User is providing change feedback after clicking "Request Changes"
+        } else if (state.pending_replan || state.checkpoint) {
+          // User is providing change feedback — either clicked "Request Changes" or typed at a checkpoint
           dispatch({ type: 'SET_PENDING_REPLAN', pending: false });
           dispatch({ type: 'CLEAR_CHECKPOINT' });
           dispatch({ type: 'SET_STATUS', status: 'replanning' });
@@ -87,7 +87,7 @@ export default function TripPage({ tripId: initialTripId, onBack }: TripPageProp
         addAssistantMessage(`Sorry, something went wrong: ${err.message}`);
       }
     },
-    [state.trip_id, state.pending_replan, setTripId, addUserMessage, addAssistantMessage, setRequest, dispatch]
+    [state.trip_id, state.pending_replan, state.checkpoint, setTripId, addUserMessage, addAssistantMessage, setRequest, dispatch]
   );
 
   const handleCheckpointAction = useCallback(

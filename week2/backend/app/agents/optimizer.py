@@ -50,8 +50,9 @@ def _optimize_budget(
 
     # If already under budget, no optimization needed
     if current_total <= budget_limit:
-        # Strip computed 'total' before constructing model (it's auto-computed)
-        bd_kwargs = {k: v for k, v in budget_data.items() if k != "total"} if budget_data else {}
+        # Strip computed fields before constructing model (they're auto-computed)
+        computed_keys = {"total", "per_person_total"}
+        bd_kwargs = {k: v for k, v in budget_data.items() if k not in computed_keys} if budget_data else {}
         bd = BudgetBreakdown(**bd_kwargs) if bd_kwargs else BudgetBreakdown(
             transport=0, accommodation=0, food=0, activities=0, buffer=0, currency="INR"
         )
@@ -137,7 +138,9 @@ def _optimize_budget(
         for day in days
         for act in day.get("activities", [])
     )
-    flight_cost = itinerary.get("selected_flight", {}).get("price", 0) if itinerary.get("selected_flight") else 0
+    traveler_count = budget_data.get("traveler_count", 1) or 1
+    transport_price_pp = itinerary.get("selected_flight", {}).get("price", 0) if itinerary.get("selected_flight") else 0
+    transport_cost = transport_price_pp * traveler_count
     hotel_cost = (
         itinerary.get("selected_hotel", {}).get("price_per_night", 0) * max(len(days) - 1, 1)
         if itinerary.get("selected_hotel") else 0
@@ -145,12 +148,13 @@ def _optimize_budget(
 
     currency = budget_data.get("currency", "INR")
     bd = BudgetBreakdown(
-        transport=flight_cost,
+        transport=transport_cost,
         accommodation=hotel_cost,
         food=budget_data.get("food", 0),
         activities=total_activity_cost,
         buffer=budget_data.get("buffer", 0),
         currency=currency,
+        traveler_count=traveler_count,
     )
 
     itinerary["total_cost"] = bd.total

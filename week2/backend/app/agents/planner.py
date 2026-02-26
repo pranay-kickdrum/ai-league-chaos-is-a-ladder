@@ -201,6 +201,9 @@ def _build_itinerary_heuristic(
     activities = research.get("activities", [])
     weather = research.get("weather", {})
 
+    logger.debug("Planner research: keys=%s, flights=%d, trains=%d, buses=%d, hotels=%d, activities=%d",
+                 list(research.keys()), len(flights), len(trains), len(buses), len(hotels), len(activities))
+
     # Normalize to dicts if they're Pydantic models
     if flights and hasattr(flights[0], "model_dump"):
         flights = [f.model_dump() for f in flights]
@@ -221,6 +224,8 @@ def _build_itinerary_heuristic(
 
     # Combine all transport options and select best
     all_transport = flights + trains + buses
+    logger.debug("Planner transport: count=%d, budget=%s, travelers=%d",
+                 len(all_transport), budget_alloc["transport"], traveler_count)
     selected_transport = _select_transport(all_transport, budget_alloc["transport"] / traveler_count)
 
     # Keep backward compat: selected_flight holds the chosen transport regardless of mode
@@ -231,6 +236,9 @@ def _build_itinerary_heuristic(
     transport_cost_pp = selected_transport.get("price", 0) if selected_transport else 0
     transport_cost = transport_cost_pp * traveler_count
     hotel_cost = (selected_hotel.get("price_per_night", 0) * nights) if selected_hotel else 0
+    logger.debug("Planner selection: transport=%s cost=%s, hotel=%s cost=%s",
+                 selected_transport.get("mode") if selected_transport else None, transport_cost,
+                 selected_hotel.get("name") if selected_hotel else None, hotel_cost)
 
     # Also keep references to best option per mode for alternatives display
     alt_flights = _select_transport(flights, budget_alloc["transport"] / traveler_count) if flights else None
@@ -466,7 +474,7 @@ async def plan(state: TripState) -> TripState:
         request = TripRequest(**request)
 
     # Clear replan_delta so the router won't re-trigger replan routing
-    state.pop("replan_delta", None)
+    state["replan_delta"] = {}
 
     research = state.get("research", {})
     state["status"] = TripStatus.PLANNING
