@@ -390,292 +390,69 @@ flowchart LR
     Parallel --> State["TripState.research<br/>Aggregated results"]
 ```
 
-### E. Full Agent Execution Sequence — Parallel vs Sequential, with Optimizations
-
-This is the core diagram for understanding **when each agent runs, what runs in parallel, where LLM calls happen, what is heuristic-only, and how the system is optimized for speed and cost**.
+### E. Agent Execution Flow — Parallel vs Sequential
 
 ```mermaid
-sequenceDiagram
-    autonumber
-    participant U as 👤 User
-    participant API as FastAPI
-    participant IP as Intent Parser<br/>(GPT-4o)
-    participant R as Researcher
-    participant LLM_N as GPT-4o-mini<br/>(Narration)
-    participant FL as Flights API
-    participant TR as Trains API
-    participant BUS as Buses API
-    participant HT as Hotels API
-    participant ACT as Activities API
-    participant WX as Weather API
-    participant ADV as Advisory API
-    participant Cache as TTL Cache
-    participant P as Planner
-    participant O as Optimizer
-    participant C as Coordinator
-    participant V as Verifier
-    participant RP as Replanner<br/>(GPT-4o)
-    participant SSE as SSE → Frontend
-    participant DB as SQLite
+flowchart TD
+    Start([User Message]) --> IP["⬇️ SEQUENTIAL<br/>Intent Parser<br/>🧠 GPT-4o · temp=0"]
+    IP --> Complete{Request<br/>Complete?}
+    Complete -->|No| FollowUp[Return follow-up question]
+    FollowUp --> Start
+    Complete -->|Yes| StartGraph["Start LangGraph"]
 
-    rect rgb(59, 130, 246, 0.08)
-    Note over U,DB: STAGE 0 — Intent Parsing (Pre-Graph, Sequential)
-    U->>API: POST /api/trips {message}
-    API->>IP: parse_intent(state)
-    Note over IP: OPTIMIZATION: Single LLM call extracts ALL fields<br/>destination, budget, dates, styles, traveler type<br/>(temp=0 for determinism)
-    IP->>IP: GPT-4o structured JSON extraction
-    IP-->>API: TripRequest (complete)
-    Note over IP: OPTIMIZATION: Budget feasibility check<br/>uses static lookup table — no LLM needed<br/>(e.g. Rishikesh ₹2000/day, Paris ₹12000/day)
-    API->>DB: create_trip(id, request)
-    API->>SSE: trip created
+    StartGraph --> QueryGen["⬇️ SEQUENTIAL<br/>Query Generator<br/>🧠 GPT-4o-mini · 5-8 queries"]
+
+    QueryGen --> ResearchGate["⚡ PARALLEL — asyncio.gather"]
+
+    subgraph ParallelBlock ["7 Concurrent Tasks · ~5s wall-clock"]
+        direction LR
+        F["✈️ Flights<br/>SerpAPI→Amadeus→Mock"]
+        T["🚆 Trains<br/>SerpAPI"]
+        B["🚌 Buses<br/>SerpAPI"]
+        H["🏨 Hotels<br/>SerpAPI→Places→Mock"]
+        A["🎯 Activities<br/>Google Places"]
+        W["🌤️ Weather<br/>OpenWeatherMap"]
+        ADV["⚠️ Advisory<br/>travel-advisory.info"]
     end
 
-    rect rgb(16, 185, 129, 0.08)
-    Note over U,DB: STAGE 1 — Research (7 PARALLEL Tasks via asyncio.gather)
-    API->>R: asyncio.create_task(_run_graph)
-    R->>LLM_N: Generate 5-8 search queries
-    Note over R,LLM_N: OPTIMIZATION: Uses cheap GPT-4o-mini (not 4o)<br/>for query generation — 15× cheaper
-    LLM_N-->>R: ["rafting Rishikesh", "yoga ashram Rishikesh", ...]
+    ResearchGate --> ParallelBlock
+    ParallelBlock --> Aggregate["Aggregate Results<br/>Individual failures isolated"]
 
-    Note over R: All 7 tasks launch SIMULTANEOUSLY
+    Aggregate --> PlanH["⬇️ SEQUENTIAL<br/>Planner — Heuristic Phase<br/>⚙️ No LLM · instant<br/>Budget split → Transport → Hotel<br/>→ Activity scheduling → Time slots"]
 
-    par Flights (with cascading fallback)
-        R->>Cache: Check cache (SHA-256 key)
-        alt Cache HIT
-            Cache-->>R: Cached flights
-        else Cache MISS
-            R->>FL: SerpAPI Google Flights
-            alt SerpAPI fails / empty
-                R->>FL: Amadeus Flight Offers v2
-                alt Amadeus fails / empty
-                    R->>R: generate_mock_flights()<br/>source="mock", is_verified=false
-                    Note over R: OPTIMIZATION: Mock fallback prevents<br/>pipeline failure — graceful degradation
-                end
-            end
-            FL-->>Cache: Cache result (1h TTL)
-        end
-        R->>SSE: research_partial("flights", data)
-    and Hotels (with cascading fallback)
-        R->>Cache: Check cache
-        alt Cache MISS
-            R->>HT: SerpAPI Google Hotels
-            alt SerpAPI fails
-                R->>HT: Google Places Text Search
-                alt Google Places fails
-                    R->>R: generate_mock_hotels()
-                end
-            end
-            HT-->>Cache: Cache result
-        end
-        R->>SSE: research_partial("hotels", data)
-    and Trains
-        R->>TR: SerpAPI search
-        TR-->>Cache: Cache result
-        R->>SSE: research_partial("trains", data)
-    and Buses
-        R->>BUS: SerpAPI search
-        BUS-->>Cache: Cache result
-        R->>SSE: research_partial("buses", data)
-    and Activities
-        R->>ACT: Google Places Text Search<br/>(multi-query, dedup by place_id)
-        ACT-->>Cache: Cache result
-        R->>SSE: research_partial("activities", data)
-    and Weather
-        R->>WX: OpenWeatherMap geocode + 5-day
-        WX-->>Cache: Cache result
-        R->>SSE: research_partial("weather", data)
-    and Travel Advisory
-        R->>ADV: travel-advisory.info
-        ADV-->>Cache: Cache result
-        R->>SSE: research_partial("advisory", data)
-    end
+    PlanH --> PlanLLM["⬇️ SEQUENTIAL<br/>Planner — Narration Phase<br/>🧠 GPT-4o-mini<br/>Day descriptions + 2 plan options"]
 
-    Note over R: asyncio.gather(return_exceptions=True)<br/>OPTIMIZATION: Individual failures don't crash pipeline.<br/>Failed tasks return empty — others succeed.
-    R->>R: Aggregate into TripState.research
-    R->>SSE: phase_update("research", "complete")
-    end
+    PlanLLM --> Opt["⬇️ SEQUENTIAL<br/>Optimizer<br/>⚙️ No LLM · greedy algorithm<br/>Swap expensive → cheaper alternatives"]
 
-    rect rgb(245, 158, 11, 0.08)
-    Note over U,DB: STAGE 2 — Planning (Sequential: Heuristic-First, then LLM)
-    R->>P: State with research data
+    Opt --> CP1{{"🔒 CHECKPOINT 1<br/>Plan Direction<br/>⏸️ Graph pauses · state → DB"}}
 
-    Note over P: SUBSTAGE 2a — Pure Heuristic (NO LLM — instant)
-    P->>P: Budget allocation by style ratios<br/>e.g. adventure: 35% activities, 20% transport
-    P->>P: Transport selection: cheapest affordable,<br/>shortest duration tiebreaker
-    P->>P: Hotel selection: highest-rated<br/>within nightly budget
-    P->>P: Round-robin activity distribution<br/>(max 3/day across all days)
-    P->>P: Sequential time slot scheduling<br/>(9AM–9PM, 1h gaps, stop at 21:00)
-    P->>P: Estimate unknown activity costs<br/>using category heuristics
+    CP1 -->|"approve"| CP2{{"🔒 CHECKPOINT 2<br/>Budget Approval<br/>⏸️ Graph pauses · state → DB"}}
+    CP1 -->|"adjust prefs"| QueryGen
+    CP1 -->|"cancel"| END1([END])
 
-    Note over P: OPTIMIZATION: Heuristic scheduling is<br/>deterministic & instant — no LLM needed.<br/>Ensures feasible schedules before narration.
+    CP2 -->|"approve"| Ver["⬇️ SEQUENTIAL<br/>Verifier<br/>⚙️ No LLM<br/>Google Places cross-ref + URL checks"]
+    CP2 -->|"request changes"| Replan["⬇️ SEQUENTIAL<br/>Replanner<br/>🧠 GPT-4o · interpret change<br/>Compute minimal delta"]
+    CP2 -->|"cancel"| END2([END])
 
-    Note over P: SUBSTAGE 2b — LLM Narration (GPT-4o-mini)
-    P->>LLM_N: Generate day titles & descriptions<br/>(one call per day)
-    LLM_N-->>P: {title, description} per day
-    P->>LLM_N: Generate 2 plan option narratives<br/>with highlights & trade-offs
-    Note over P,LLM_N: OPTIMIZATION: Anti-hallucination rule baked<br/>into prompt — "Only reference places in schedule"
-    LLM_N-->>P: PlanOption[2] with titles, highlights
-    P->>SSE: plan_ready(options)
-    P->>SSE: budget_update(breakdown)
-    end
+    Ver --> CP3{{"🔒 CHECKPOINT 3<br/>Final Review + Price Re-validation<br/>⏸️ Re-check flight & hotel prices"}}
 
-    rect rgb(139, 92, 246, 0.08)
-    Note over U,DB: STAGE 3 — Optimization (Sequential, NO LLM — Pure Heuristic)
-    P->>O: State with itinerary + budget
+    CP3 -->|"confirm"| Fin["⬇️ SEQUENTIAL<br/>Finalizer<br/>⚙️ No LLM<br/>BookingCart + TripPackage"]
+    CP3 -->|"request changes"| Replan
+    CP3 -->|"cancel"| END3([END])
 
-    Note over O: OPTIMIZATION: Entire optimizer is zero-LLM.<br/>Greedy algorithm runs in milliseconds.
-    O->>O: Compare total vs budget limit
-    alt Over budget
-        O->>O: Sort activities by cost (descending)
-        loop For each expensive activity
-            O->>O: Find cheaper same-category alternative<br/>from research data (highest-rated)
-            O->>O: Swap & record saving in reasoning_log
-        end
-        alt Still over budget
-            O->>O: Downgrade hotel to next-best-rated<br/>cheaper option
-        end
-    end
-    O->>O: Recalculate BudgetBreakdown<br/>(Pydantic computed_field ensures consistency)
-    O->>SSE: budget_update(optimized breakdown)
-    O->>SSE: agent_thinking("Saved ₹X by swapping...")
-    end
+    Replan --> ReplanRoute{Re-research<br/>needed?}
+    ReplanRoute -->|"Yes"| QueryGen
+    ReplanRoute -->|"No · reuse data"| PlanH
 
-    rect rgb(239, 68, 68, 0.08)
-    Note over U,DB: 🔒 CHECKPOINT 1 — Plan Direction (Execution PAUSES)
-    O->>C: State with plan options + budget
-    C->>C: Build trip understanding summary
-    C->>C: Serialize research for frontend preview
-    C->>C: Budget feasibility assessment
-    C->>SSE: emit checkpoint(cp1, options, research, budget)
-    C->>SSE: emit itinerary_ready(itinerary)
-    C->>SSE: emit map_update(markers)
-    C->>DB: persist full TripState as JSON
-    Note over C,DB: ⏸️ Graph PAUSED — awaiting_human = true
+    Fin --> Done([✅ Trip Complete])
 
-    U->>API: POST /checkpoint {action: "approve"}
-    API->>DB: Load state, inject decision
-    API->>API: Resume graph via asyncio.create_task
-    Note over API: Router reads decision → routes to CP2
-    end
-
-    rect rgb(239, 68, 68, 0.08)
-    Note over U,DB: 🔒 CHECKPOINT 2 — Budget Approval (Execution PAUSES)
-    C->>SSE: emit checkpoint(cp2, budget_breakdown)
-    C->>DB: persist state
-    Note over C,DB: ⏸️ Graph PAUSED
-
-    U->>API: POST /checkpoint {action: "approve"}
-    API->>API: Resume graph → routes to Verifier
-    end
-
-    rect rgb(6, 182, 212, 0.08)
-    Note over U,DB: STAGE 4 — Verification (Sequential — API Rate Limits)
-    C->>V: State with itinerary
-
-    loop For each activity + hotel
-        V->>ACT: Google Places Text Search<br/>(confirm existence)
-        ACT-->>V: place_id, coordinates, rating
-        V->>V: Update activity: is_verified=true,<br/>lat/lng, place_id
-    end
-
-    loop For each booking URL
-        V->>V: HTTP HEAD check
-        alt Dead link
-            V->>V: Replace with Google Search fallback URL
-        end
-    end
-
-    Note over V: OPTIMIZATION: Skip places that already<br/>have place_id from research phase —<br/>only verify unconfirmed places.
-    V->>SSE: "8/10 places verified (80%)"
-    end
-
-    rect rgb(239, 68, 68, 0.08)
-    Note over U,DB: 🔒 CHECKPOINT 3 — Final Review + Price Re-validation
-    V->>C: State with verified itinerary
-
-    Note over C: OPTIMIZATION: Re-validate prices only<br/>for selected transport & hotel —<br/>not all options. Minimizes API calls.
-    C->>FL: Re-check selected flight price
-    FL-->>C: Current price (may have changed)
-    C->>HT: Re-check selected hotel price
-    HT-->>C: Current price
-    alt Price changed
-        C->>SSE: price_changed(item, old, new)
-    end
-    C->>SSE: emit checkpoint(cp3, booking_options, verification)
-    C->>DB: persist state
-    Note over C,DB: ⏸️ Graph PAUSED
-
-    U->>API: POST /checkpoint {action: "confirm"}
-    API->>API: Resume graph → routes to Finalize
-    end
-
-    rect rgb(16, 185, 129, 0.08)
-    Note over U,DB: STAGE 5 — Finalization (Sequential, NO LLM)
-    C->>C: Build BookingCart (flight + hotel items)
-    C->>C: Compile TripPackage<br/>(itinerary + budget + bookings + verification)
-    C->>SSE: emit complete(trip_package)
-    C->>DB: status = COMPLETE
-    end
-
-    rect rgb(251, 191, 36, 0.08)
-    Note over U,DB: OPTIONAL — Dynamic Replanning (if user requests changes)
-    U->>API: "Reduce budget to ₹10,000"
-    API->>RP: replan(state)
-    RP->>RP: GPT-4o interprets change<br/>against current itinerary
-    Note over RP: OPTIMIZATION: Uses GPT-4o only here<br/>because change interpretation requires<br/>complex reasoning over full context
-    RP->>RP: Classify: change_budget<br/>Compute delta: re_research_needed=true
-    RP->>RP: Update TripRequest.budget = 10000
-    alt Re-research needed
-        RP->>R: Route back to Researcher<br/>(full parallel research re-runs)
-    else Plan-only change
-        RP->>P: Route to Planner<br/>(reuse existing research data)
-        Note over RP,P: OPTIMIZATION: Reuses cached research<br/>when change doesn't need fresh API data
-    end
-    end
+    style ParallelBlock fill:#ecfdf5,stroke:#10b981,stroke-width:2px
+    style CP1 fill:#fef2f2,stroke:#ef4444,stroke-width:2px
+    style CP2 fill:#fef2f2,stroke:#ef4444,stroke-width:2px
+    style CP3 fill:#fef2f2,stroke:#ef4444,stroke-width:2px
 ```
 
-### E.1 Agent Execution Summary — Parallel vs Sequential
-
-| Stage | Agent(s) | Execution | LLM? | Optimization Rationale |
-|---|---|---|---|---|
-| **0. Intent Parsing** | Intent Parser | Sequential | GPT-4o (1 call) | Single LLM call extracts all fields — no multi-turn extraction chain. Budget feasibility uses static lookup. |
-| **1. Research** | Researcher | **7-way Parallel** (`asyncio.gather`) | GPT-4o-mini (1 call for queries) | Parallelism cuts wall-clock from ~35s (sequential) to ~5-7s. Cheap model for query generation. Cascading fallbacks prevent failure. `return_exceptions=True` isolates task failures. Results cached 1h. |
-| **2. Planning** | Planner | Sequential (heuristic → LLM) | GPT-4o-mini (N+1 calls) | Heuristic-first guarantees feasible schedule before any LLM call. LLM only narrates — never decides structure. Anti-hallucination rules in prompts. |
-| **3. Optimization** | Optimizer | Sequential | **None** | Zero LLM calls. Greedy algorithm runs in ~1ms. Reasoning log provides full transparency without AI cost. |
-| **CP1** | Coordinator | Sequential (checkpoint) | None | Pauses graph cleanly. Full state persisted to DB for crash-safe resumption. |
-| **CP2** | Coordinator | Sequential (checkpoint) | None | Lightweight gate — emits budget data, no computation. |
-| **4. Verification** | Verifier | Sequential (per-place) | None | Sequential to respect Google Places API rate limits. Skips already-verified places. |
-| **CP3** | Coordinator | Sequential (re-validation) | None | Re-validates only 2 prices (selected flight + hotel), not all research results. |
-| **5. Finalization** | Coordinator | Sequential | None | Pure data compilation. No API calls, no LLM. |
-| **Replan** | Replanner | Sequential | GPT-4o (1 call) | GPT-4o justified here — must interpret free-text against complex itinerary context. Minimal delta computation avoids full re-run. |
-
-### E.2 Cost & Latency Optimization Summary
-
-```mermaid
-graph LR
-    subgraph CostOpt ["💰 Cost Optimizations"]
-        C1["Dual-model: GPT-4o only for<br/>complex reasoning (2 agents)<br/>GPT-4o-mini for everything else"]
-        C2["Optimizer = zero LLM<br/>Pure greedy heuristic"]
-        C3["Coordinator = zero LLM<br/>Data serialization only"]
-        C4["Verifier = zero LLM<br/>API lookups only"]
-        C5["1-hour TTL cache<br/>eliminates repeat API calls"]
-    end
-
-    subgraph SpeedOpt ["⚡ Latency Optimizations"]
-        S1["7-way parallel research<br/>asyncio.gather<br/>~5s vs ~35s sequential"]
-        S2["Heuristic-first planning<br/>Instant scheduling<br/>before LLM narration"]
-        S3["Cascading fallbacks<br/>Never blocked by<br/>single API failure"]
-        S4["Skip verified places<br/>in Verifier"]
-        S5["Re-validate only 2 prices<br/>at CP3, not all options"]
-    end
-
-    subgraph ReliabilityOpt ["🛡️ Reliability Optimizations"]
-        R1["Circuit breaker per API<br/>5 failures → skip for 5 min"]
-        R2["return_exceptions=True<br/>Individual task isolation"]
-        R3["Mock data fallback<br/>Demo works even with<br/>zero API keys"]
-        R4["State persistence at<br/>every checkpoint<br/>Crash-safe resumption"]
-    end
-```
+**Legend**: ⬇️ SEQUENTIAL = runs one-at-a-time in pipeline order · ⚡ PARALLEL = concurrent tasks via `asyncio.gather` · 🧠 = LLM call · ⚙️ = pure heuristic (no LLM) · 🔒 = human-in-the-loop checkpoint (graph pauses, state persisted to DB)
 
 ---
 
