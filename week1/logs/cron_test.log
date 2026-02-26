@@ -1,0 +1,66 @@
+
+================================================================================
+KNOWLEDGE BASE HEALTH CHECK
+================================================================================
+
+✓ Total chunks in knowledge base: 12,837
+
+⚠ WARNING: No ingestion timestamps found
+
+📊 Category Distribution:
+  fact_check          : 12,837 (100.0%)
+
+📰 Top Sources:
+  LIAR / PolitiFact             : 12,837 (100.0%)
+
+✓ No expired documents
+
+================================================================================
+⚠ HEALTH CHECK: 1 ALERT(S)
+  - No ingestion timestamps found
+================================================================================
+
+
+================================================================================
+KNOWLEDGE BASE HEALTH CHECK
+================================================================================
+
+✓ Total chunks in knowledge base: 12,837
+
+⚠ WARNING: No ingestion timestamps found
+
+📊 Category Distribution:
+  fact_check          : 12,837 (100.0%)
+
+📰 Top Sources:
+  LIAR / PolitiFact             : 12,837 (100.0%)
+
+✓ No expired documents
+
+================================================================================
+⚠ HEALTH CHECK: 1 ALERT(S)
+  - No ingestion timestamps found
+================================================================================
+
+
+================================================================================
+KNOWLEDGE BASE HEALTH CHECK
+================================================================================
+
+✓ Total chunks in knowledge base: 12,837
+
+⚠ WARNING: No ingestion timestamps found
+
+📊 Category Distribution:
+  fact_check          : 12,837 (100.0%)
+
+📰 Top Sources:
+  LIAR / PolitiFact             : 12,837 (100.0%)
+
+✓ No expired documents
+
+================================================================================
+⚠ HEALTH CHECK: 1 ALERT(S)
+  - No ingestion timestamps found
+================================================================================
+
