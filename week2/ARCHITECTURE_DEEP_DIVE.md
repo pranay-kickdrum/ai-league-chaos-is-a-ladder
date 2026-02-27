@@ -43,6 +43,112 @@ With conditional back-edges:
 
 The `Router` node is a pass-through that uses a conditional edge (`_route_entry`) to dispatch to the correct starting node based on checkpoint state — enabling graph resumption after human approval.
 
+### LangGraph StateGraph — Actual Compiled Graph
+
+The diagram below is a 1-to-1 representation of the compiled `StateGraph` defined in `app/agents/graph.py`. Every node, edge, and conditional branch maps directly to a `graph.add_node` / `graph.add_edge` / `graph.add_conditional_edges` call.
+
+```mermaid
+stateDiagram-v2
+    [*] --> router
+
+    state router_fork <<choice>>
+    router --> router_fork
+
+    router_fork --> do_research : fresh start / adjust prefs
+    router_fork --> plan : regenerate / replan (no re-research)
+    router_fork --> checkpoint_2 : cp1 approved
+    router_fork --> verify : cp2 approved
+    router_fork --> replan : cp2 or cp3 request changes
+    router_fork --> finalize : cp3 confirmed
+    router_fork --> [*] : cancel
+
+    do_research --> plan
+    plan --> optimize
+    optimize --> checkpoint_1
+
+    state cp1_fork <<choice>>
+    checkpoint_1 --> cp1_fork
+
+    cp1_fork --> checkpoint_2 : approve / select plan
+    cp1_fork --> plan : regenerate
+    cp1_fork --> do_research : adjust preferences
+    cp1_fork --> [*] : cancel
+
+    state cp2_fork <<choice>>
+    checkpoint_2 --> cp2_fork
+
+    cp2_fork --> verify : approve budget
+    cp2_fork --> replan : request changes
+    cp2_fork --> [*] : cancel
+
+    verify --> checkpoint_3
+
+    state cp3_fork <<choice>>
+    checkpoint_3 --> cp3_fork
+
+    cp3_fork --> finalize : confirm & book
+    cp3_fork --> replan : request changes
+    cp3_fork --> [*] : cancel
+
+    finalize --> [*]
+
+    state replan_fork <<choice>>
+    replan --> replan_fork
+
+    replan_fork --> do_research : re-research needed
+    replan_fork --> plan : reuse existing data
+
+    note right of router
+        Entry point — _route_entry()
+        dispatches based on
+        checkpoint_decision + replan_delta
+    end note
+
+    note right of checkpoint_1
+        🔒 Human gate — Plan Direction
+        awaiting_human = true
+        Graph pauses, state → DB
+    end note
+
+    note right of checkpoint_2
+        🔒 Human gate — Budget Approval
+        awaiting_human = true
+        Graph pauses, state → DB
+    end note
+
+    note right of checkpoint_3
+        🔒 Human gate — Final Review
+        + Price Re-validation
+        awaiting_human = true
+        Graph pauses, state → DB
+    end note
+```
+
+**Node ↔ Code mapping:**
+
+| Graph Node | Agent Function | Source File |
+|---|---|---|
+| `router` | `_router()` (pass-through) | `graph.py` |
+| `do_research` | `research(state)` | `researcher.py` |
+| `plan` | `plan(state)` | `planner.py` |
+| `optimize` | `optimize(state)` | `optimizer.py` |
+| `checkpoint_1` | `checkpoint_1(state)` | `coordinator.py` |
+| `checkpoint_2` | `checkpoint_2(state)` | `coordinator.py` |
+| `verify` | `verify(state)` | `verifier.py` |
+| `checkpoint_3` | `checkpoint_3(state)` | `coordinator.py` |
+| `finalize` | `finalize(state)` | `coordinator.py` |
+| `replan` | `replan(state)` | `replanner.py` |
+
+**Conditional edge routing functions:**
+
+| Source Node | Routing Function | Possible Targets |
+|---|---|---|
+| `router` | `_route_entry()` | `do_research`, `plan`, `checkpoint_2`, `verify`, `replan`, `finalize`, `END` |
+| `checkpoint_1` | `_after_checkpoint_1()` | `checkpoint_2`, `plan`, `do_research`, `END` |
+| `checkpoint_2` | `_after_checkpoint_2()` | `verify`, `replan`, `END` |
+| `checkpoint_3` | `_after_checkpoint_3()` | `finalize`, `replan`, `END` |
+| `replan` | `_after_replan()` | `do_research`, `plan` |
+
 ### State & Memory Sharing
 
 All agents share a single `TripState` TypedDict containing 30+ fields:
