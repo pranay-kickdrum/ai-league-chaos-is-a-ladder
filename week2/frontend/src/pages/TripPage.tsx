@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Download, FileText } from 'lucide-react';
 import ChatPanel from '../components/chat/ChatPanel';
 import ProgressStepper from '../components/progress/ProgressStepper';
@@ -6,10 +6,10 @@ import AgentLiveStatus from '../components/progress/AgentLiveStatus';
 import ItineraryTimeline from '../components/itinerary/ItineraryTimeline';
 import BudgetBreakdownComp from '../components/budget/BudgetBreakdown';
 import BookingCartComp from '../components/booking/BookingCart';
-import TripMap from '../components/map/TripMap';
 import ResearchPreview from '../components/research/ResearchPreview';
 import ErrorRecovery from '../components/common/ErrorRecovery';
 import { useTrip } from '../hooks/useTrip';
+import type { ResearchFlight, ResearchHotel } from '../types';
 import {
   createTrip,
   sendChatMessage,
@@ -22,11 +22,40 @@ import {
 
 interface TripPageProps {
   tripId?: string;
+  initialPrompt?: string;
   onBack: () => void;
 }
 
-export default function TripPage({ tripId: initialTripId, onBack }: TripPageProps) {
+export default function TripPage({ tripId: initialTripId, initialPrompt, onBack }: TripPageProps) {
   const { state, dispatch, setTripId, addUserMessage, addAssistantMessage, setRequest, reset } = useTrip();
+
+  // Selection state for transport & hotel — initialized from checkpoint recommended IDs
+  const [selectedTransport, setSelectedTransport] = useState<ResearchFlight | undefined>();
+  const [selectedHotel, setSelectedHotel] = useState<ResearchHotel | undefined>();
+
+  // Initialize selections when checkpoint arrives with recommended IDs
+  useEffect(() => {
+    const recTransportId = state.checkpoint?.recommended_transport_id;
+    const recHotelId = state.checkpoint?.recommended_hotel_id;
+    if (recTransportId && state.research) {
+      // Update if no selection yet, or if the recommended ID changed (e.g. after replan)
+      if (!selectedTransport || selectedTransport.id !== recTransportId) {
+        const allTransport = [
+          ...(state.research.flights ?? []),
+          ...(state.research.trains ?? []),
+          ...(state.research.buses ?? []),
+        ];
+        const rec = allTransport.find(t => t.id === recTransportId);
+        if (rec) setSelectedTransport(rec);
+      }
+    }
+    if (recHotelId && state.research) {
+      if (!selectedHotel || selectedHotel.id !== recHotelId) {
+        const rec = state.research.hotels?.find(h => h.id === recHotelId);
+        if (rec) setSelectedHotel(rec);
+      }
+    }
+  }, [state.checkpoint, state.research]);
 
   // Load existing trip if ID provided
   useEffect(() => {
@@ -65,11 +94,22 @@ export default function TripPage({ tripId: initialTripId, onBack }: TripPageProp
               `Great! Planning a ${res.request.duration_days}-day trip to ${res.request.destination}. Let me research the best options for you...`
             );
           }
-        } else if (state.pending_replan || state.checkpoint) {
-          // User is providing change feedback — either clicked "Request Changes" or typed at a checkpoint
+        } else if (state.pending_replan) {
+          // User clicked "Request Changes" and then typed their change request
           dispatch({ type: 'SET_PENDING_REPLAN', pending: false });
           dispatch({ type: 'CLEAR_CHECKPOINT' });
           dispatch({ type: 'SET_STATUS', status: 'replanning' });
+          setSelectedTransport(undefined);
+          setSelectedHotel(undefined);
+          addAssistantMessage(`Got it! Adjusting the plan: "${text}"...`);
+          await requestReplan(state.trip_id, text);
+        } else if (state.checkpoint) {
+          // User typed at a checkpoint without clicking "Request Changes" —
+          // treat as a replan request directly (they want to change something)
+          dispatch({ type: 'CLEAR_CHECKPOINT' });
+          dispatch({ type: 'SET_STATUS', status: 'replanning' });
+          setSelectedTransport(undefined);
+          setSelectedHotel(undefined);
           addAssistantMessage(`Got it! Adjusting the plan: "${text}"...`);
           await requestReplan(state.trip_id, text);
         } else {
@@ -91,14 +131,14 @@ export default function TripPage({ tripId: initialTripId, onBack }: TripPageProp
   );
 
   const handleCheckpointAction = useCallback(
-    async (action: string) => {
+    async (action: string, metadata?: Record<string, string>) => {
       if (!state.trip_id || !state.checkpoint) return;
       const cpId = state.checkpoint.checkpoint_id;
 
       // Handle plan selection (CP1 now has plan options)
       if (action.startsWith('select_plan:')) {
         const planId = action.replace('select_plan:', '');
-        await submitCheckpoint(state.trip_id, cpId, 'select', planId);
+        await submitCheckpoint(state.trip_id, cpId, 'select', planId, metadata);
         dispatch({ type: 'CLEAR_CHECKPOINT' });
         addAssistantMessage(`Selected plan ${planId}. Reviewing budget allocation...`);
         return;
@@ -141,6 +181,9 @@ export default function TripPage({ tripId: initialTripId, onBack }: TripPageProp
             onSend={handleSend}
             onCheckpointAction={handleCheckpointAction}
             disabled={isProcessing}
+            initialPrompt={initialPrompt}
+            selectedTransport={selectedTransport}
+            selectedHotel={selectedHotel}
           />
         </div>
 
@@ -201,14 +244,17 @@ export default function TripPage({ tripId: initialTripId, onBack }: TripPageProp
             />
           )}
 
-          {/* Map */}
-          <TripMap markers={state.markers ?? []} />
-
           {/* Research preview — earliest phase, shown at bottom */}
           {state.research && (
             <ResearchPreview
               research={state.research}
               currency={state.request?.currency}
+              selectedTransportId={selectedTransport?.id}
+              selectedHotelId={selectedHotel?.id}
+              recommendedTransportId={state.checkpoint?.recommended_transport_id}
+              recommendedHotelId={state.checkpoint?.recommended_hotel_id}
+              onSelectTransport={state.checkpoint?.type === 'plan_direction' ? setSelectedTransport : undefined}
+              onSelectHotel={state.checkpoint?.type === 'plan_direction' ? setSelectedHotel : undefined}
             />
           )}
         </div>

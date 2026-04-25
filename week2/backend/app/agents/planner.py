@@ -76,18 +76,53 @@ def _build_time_slots(day_index: int, activities: list[dict], start_hour: int = 
     return scheduled
 
 
+GROUND_DURATION_THRESHOLD_MINUTES = 720  # 12 hours — prefer flights over trains/buses longer than this
+
+
 def _select_transport(all_options: list[dict], budget_transport: float) -> dict | None:
     """Select best transport option across all modes within budget.
 
-    Priority: cheapest affordable first, then shortest duration as tiebreaker.
+    Rules:
+      1. If a train or bus journey exceeds ~12 hours, prefer flights instead.
+      2. Among remaining options: cheapest affordable first, then shortest duration
+         as tiebreaker.
     """
     if not all_options:
         return None
-    affordable = [t for t in all_options if t.get("price", 0) <= budget_transport]
+
+    # Separate flights from ground transport
+    flights = [t for t in all_options if t.get("mode") not in ("train", "bus")]
+    ground = [t for t in all_options if t.get("mode") in ("train", "bus")]
+
+    # Keep only ground options shorter than the threshold
+    short_ground = [
+        t for t in ground
+        if t.get("duration_minutes", 9999) <= GROUND_DURATION_THRESHOLD_MINUTES
+    ]
+    long_ground = [
+        t for t in ground
+        if t.get("duration_minutes", 9999) > GROUND_DURATION_THRESHOLD_MINUTES
+    ]
+    if long_ground:
+        logger.info(
+            "Excluding %d ground-transport option(s) exceeding %d min: %s",
+            len(long_ground),
+            GROUND_DURATION_THRESHOLD_MINUTES,
+            [(t.get("mode"), t.get("airline_or_operator"), t.get("duration_minutes")) for t in long_ground],
+        )
+
+    # Preferred pool: flights + short ground trips
+    preferred = flights + short_ground
+
+    affordable = [t for t in preferred if t.get("price", 0) <= budget_transport]
     if affordable:
-        # Prefer shortest duration among affordable
         return min(affordable, key=lambda t: t.get("duration_minutes", 9999))
-    # Return cheapest if none affordable
+
+    # Nothing affordable in preferred pool — try all preferred regardless of budget
+    if preferred:
+        return min(preferred, key=lambda t: t.get("price", float("inf")))
+
+    # Fallback: even long ground options are better than nothing
     return min(all_options, key=lambda t: t.get("price", float("inf")))
 
 
@@ -98,13 +133,15 @@ def _select_flight(flights: list[dict], budget_transport: float) -> dict | None:
 
 def _select_hotel(hotels: list[dict], budget_per_night: float) -> dict | None:
     """Select best hotel within nightly budget."""
-    if not hotels:
+    # Filter out hotels with no price data (price_per_night <= 0)
+    priced = [h for h in hotels if h.get("price_per_night", 0) > 0]
+    if not priced:
         return None
-    affordable = [h for h in hotels if h.get("price_per_night", 0) <= budget_per_night]
+    affordable = [h for h in priced if h.get("price_per_night", 0) <= budget_per_night]
     if affordable:
         # Prefer highest rating among affordable
         return max(affordable, key=lambda h: h.get("rating", 0))
-    return min(hotels, key=lambda h: h.get("price_per_night", float("inf")))
+    return min(priced, key=lambda h: h.get("price_per_night", float("inf")))
 
 
 def _distribute_activities(activities: list[dict], num_days: int) -> list[list[dict]]:
@@ -146,11 +183,13 @@ def _estimate_activity_costs(
     budget_for_activities: float,
     currency: str = "INR",
 ) -> list[dict]:
-    """Fill in missing activity prices using category heuristics and budget distribution.
+    """Fill in missing activity prices using heuristics. Keeps LLM-estimated prices intact.
 
     Strategy:
-      1. Assign each zero-priced activity an estimated cost based on category.
-      2. Scale all estimates so the total fits inside `budget_for_activities`.
+      1. If an activity already has a price > 0 (e.g. from LLM enrichment), keep it.
+      2. For zero-priced activities, estimate using category + price_level + rating
+         to produce varied, realistic costs.
+      3. Scale only the estimated prices if the total exceeds the budget.
     """
     if not activities:
         return activities
@@ -160,24 +199,51 @@ def _estimate_activity_costs(
 
     enriched: list[dict] = []
     for act in activities:
+        # Guard: skip non-dict items (e.g. strings from bad serialization)
+        if isinstance(act, str):
+            try:
+                act = json.loads(act)
+            except (json.JSONDecodeError, TypeError):
+                logger.warning("Skipping non-dict activity: %s", act[:80] if len(act) > 80 else act)
+                continue
+        if not isinstance(act, dict):
+            continue
         a = dict(act)  # shallow copy
         price = a.get("price", 0) or a.get("cost", 0) or 0
+
         if price <= 0:
+            # Use price_level (0-4) + rating + category for varied estimation
             cat = a.get("category", "general")
             lo, hi = _CATEGORY_COST_ESTIMATE.get(cat, (100, 500))
-            # Midpoint estimate, scaled for currency
-            midpoint = (lo + hi) / 2
-            price = round(midpoint * fx, 2) if fx < 1 else midpoint
+
+            price_level = a.get("price_level")  # 0-4 or None
+            rating = a.get("rating", 0) or 0
+
+            if price_level is not None and price_level >= 0:
+                # Interpolate within range using price_level (0→lo, 4→hi)
+                fraction = price_level / 4.0
+            else:
+                # Use rating as a proxy (0→lo, 5→hi)
+                fraction = min(rating / 5.0, 1.0) if rating > 0 else 0.4
+
+            # Name-based hash for deterministic variation within the range
+            name_hash = sum(ord(c) for c in a.get("name", "")) % 100
+            jitter = (name_hash - 50) / 100.0  # −0.5 to +0.49
+
+            base_price = lo + (hi - lo) * fraction
+            # Apply ±20% jitter for uniqueness
+            base_price *= (1.0 + jitter * 0.4)
+            base_price = max(base_price, lo)  # don't go below range floor
+
+            price = round(base_price * fx, 0) if fx < 1 else round(base_price, 0)
+
         a["price"] = price
         enriched.append(a)
 
-    # Scale so total ≤ budget (if budget > 0)
+    # Scale only to keep total within budget, but don't flatten prices
     raw_total = sum(a["price"] for a in enriched)
-    if raw_total > 0 and budget_for_activities > 0 and raw_total != budget_for_activities:
+    if raw_total > 0 and budget_for_activities > 0 and raw_total > budget_for_activities:
         scale = budget_for_activities / raw_total
-        # Only scale down, don't inflate beyond 1.5×
-        if scale < 1.0 or scale > 1.5:
-            scale = min(scale, 1.5)
         for a in enriched:
             a["price"] = round(a["price"] * scale, 2)
 
@@ -188,6 +254,7 @@ def _build_itinerary_heuristic(
     request: TripRequest,
     research: dict,
     budget_alloc: dict[str, float],
+    transport_preference: str | None = None,
 ) -> tuple[Itinerary, BudgetBreakdown]:
     """Build a complete itinerary from research data using heuristics."""
     num_days = request.duration_days
@@ -216,17 +283,40 @@ def _build_itinerary_heuristic(
     if activities and hasattr(activities[0], "model_dump"):
         activities = [a.model_dump() for a in activities]
 
-    # Estimate activity costs (Google Places doesn't return prices)
-    activities = _estimate_activity_costs(activities, budget_alloc["activities"], currency)
-
     # Traveler count — costs for flights/food scale per person
     traveler_count = max(getattr(request, 'traveler_count', 1), 1)
 
+    # Estimate activity costs (Google Places doesn't return prices)
+    # budget_for_activities is for the whole group; activity prices are per-person
+    # so pass per-person budget to the estimator for proper scaling
+    activities = _estimate_activity_costs(activities, budget_alloc["activities"] / traveler_count, currency)
+
     # Combine all transport options and select best
     all_transport = flights + trains + buses
-    logger.debug("Planner transport: count=%d, budget=%s, travelers=%d",
-                 len(all_transport), budget_alloc["transport"], traveler_count)
-    selected_transport = _select_transport(all_transport, budget_alloc["transport"] / traveler_count)
+    logger.debug("Planner transport: count=%d, budget=%s, travelers=%d, preference=%s",
+                 len(all_transport), budget_alloc["transport"], traveler_count, transport_preference)
+
+    # Normalize transport preference: LLM may return "flights" instead of "flight"
+    if transport_preference:
+        _tp_aliases = {
+            "flights": "flight", "air": "flight", "plane": "flight",
+            "trains": "train", "rail": "train", "railway": "train",
+            "buses": "bus", "coach": "bus",
+        }
+        transport_preference = _tp_aliases.get(transport_preference.lower(), transport_preference.lower())
+
+    # If user has a transport preference, filter to that mode first
+    if transport_preference:
+        preferred_options = [t for t in all_transport if t.get("mode") == transport_preference]
+        if preferred_options:
+            selected_transport = _select_transport(preferred_options, budget_alloc["transport"] / traveler_count)
+            logger.info("Using preferred %s transport: %s", transport_preference,
+                       selected_transport.get("airline_or_operator") if selected_transport else "none")
+        else:
+            logger.warning("No %s options found, falling back to all transport", transport_preference)
+            selected_transport = _select_transport(all_transport, budget_alloc["transport"] / traveler_count)
+    else:
+        selected_transport = _select_transport(all_transport, budget_alloc["transport"] / traveler_count)
 
     # Keep backward compat: selected_flight holds the chosen transport regardless of mode
     selected_flight = selected_transport
@@ -236,9 +326,34 @@ def _build_itinerary_heuristic(
     transport_cost_pp = selected_transport.get("price", 0) if selected_transport else 0
     transport_cost = transport_cost_pp * traveler_count
     hotel_cost = (selected_hotel.get("price_per_night", 0) * nights) if selected_hotel else 0
-    logger.debug("Planner selection: transport=%s cost=%s, hotel=%s cost=%s",
+
+    # Airport transfer: if flight selected and airport is in a different city,
+    # pick the best connecting transport (train/bus) from airport city to destination
+    airport_transfers = research.get("airport_transfers", [])
+    airport_city = research.get("airport_city", "")
+    selected_airport_transfer = None
+    airport_transfer_cost = 0.0
+    if airport_transfers and hasattr(airport_transfers[0], "model_dump"):
+        airport_transfers = [t.model_dump() for t in airport_transfers]
+
+    if airport_city and airport_transfers and selected_transport and selected_transport.get("mode") == "flight":
+        # Select cheapest transfer option
+        priced_transfers = [t for t in airport_transfers if t.get("price", 0) > 0]
+        if priced_transfers:
+            selected_airport_transfer = min(priced_transfers, key=lambda t: t.get("price", float("inf")))
+            # Transfer price is round-trip per person already (ground_transport doubles)
+            airport_transfer_cost = selected_airport_transfer.get("price", 0) * traveler_count
+            transport_cost += airport_transfer_cost
+            logger.info("Airport transfer %s → %s: %s %s (₹%s pp)",
+                        airport_city, request.destination,
+                        selected_airport_transfer.get("mode"),
+                        selected_airport_transfer.get("airline_or_operator", ""),
+                        selected_airport_transfer.get("price", 0))
+
+    logger.debug("Planner selection: transport=%s cost=%s, hotel=%s cost=%s, airport_transfer=%s",
                  selected_transport.get("mode") if selected_transport else None, transport_cost,
-                 selected_hotel.get("name") if selected_hotel else None, hotel_cost)
+                 selected_hotel.get("name") if selected_hotel else None, hotel_cost,
+                 f"{airport_city}→{request.destination}" if selected_airport_transfer else "none")
 
     # Also keep references to best option per mode for alternatives display
     alt_flights = _select_transport(flights, budget_alloc["transport"] / traveler_count) if flights else None
@@ -292,22 +407,49 @@ def _build_itinerary_heuristic(
     transport_legs: list[TransportLeg] = []
     transport_mode = selected_transport.get("mode", "flight") if selected_transport else "flight"
     if selected_transport:
+        # Outbound main leg
         transport_legs.append(TransportLeg(
             mode=transport_mode,
             from_location=request.origin,
-            to_location=request.destination,
-            cost=transport_cost,
+            to_location=airport_city if selected_airport_transfer else request.destination,
+            cost=transport_cost_pp * traveler_count,
             currency=currency,
             booking_url=selected_transport.get("booking_url"),
             notes=f"{selected_transport.get('airline_or_operator', '')} {selected_transport.get('departure_time', '')} → {selected_transport.get('arrival_time', '')}".strip(),
             duration_minutes=selected_transport.get("duration_minutes", 0),
         ))
-        # Return leg (same mode, same price)
+        # Outbound airport transfer (if needed)
+        if selected_airport_transfer:
+            transfer_mode = selected_airport_transfer.get("mode", "bus")
+            transfer_pp = selected_airport_transfer.get("price", 0)
+            transport_legs.append(TransportLeg(
+                mode=transfer_mode,
+                from_location=airport_city,
+                to_location=request.destination,
+                cost=transfer_pp * traveler_count / 2,  # price is round-trip, halve for one-way
+                currency=currency,
+                booking_url=selected_airport_transfer.get("booking_url"),
+                notes=f"{selected_airport_transfer.get('airline_or_operator', '')} — Airport transfer".strip(),
+                duration_minutes=selected_airport_transfer.get("duration_minutes", 0),
+            ))
+        # Return airport transfer (if needed)
+        if selected_airport_transfer:
+            transport_legs.append(TransportLeg(
+                mode=transfer_mode,
+                from_location=request.destination,
+                to_location=airport_city,
+                cost=transfer_pp * traveler_count / 2,
+                currency=currency,
+                booking_url=selected_airport_transfer.get("booking_url"),
+                notes=f"Return transfer to {airport_city} airport",
+                duration_minutes=selected_airport_transfer.get("duration_minutes", 0),
+            ))
+        # Return main leg
         transport_legs.append(TransportLeg(
             mode=transport_mode,
-            from_location=request.destination,
+            from_location=airport_city if selected_airport_transfer else request.destination,
             to_location=request.origin,
-            cost=transport_cost,
+            cost=transport_cost_pp * traveler_count,
             currency=currency,
             booking_url=selected_transport.get("booking_url"),
             notes=f"Return {transport_mode}",
@@ -316,18 +458,28 @@ def _build_itinerary_heuristic(
 
     # Attach transport to first & last day plans
     if transport_legs and day_plans:
-        day_plans[0].transport = [transport_legs[0]]
-        if len(day_plans) > 1:
-            day_plans[-1].transport = [transport_legs[1]]
+        if selected_airport_transfer:
+            # Legs: [flight_out, transfer_out, transfer_return, flight_return]
+            day_plans[0].transport = transport_legs[:2]
+            if len(day_plans) > 1:
+                day_plans[-1].transport = transport_legs[2:]
+        else:
+            # Legs: [outbound, return]
+            day_plans[0].transport = [transport_legs[0]]
+            if len(day_plans) > 1 and len(transport_legs) > 1:
+                day_plans[-1].transport = [transport_legs[1]]
 
     food_cost = budget_alloc["food"]
     buffer = budget_alloc["buffer"]
+
+    # Activity costs in day plans are per-person; total for group = pp × travelers
+    total_activity_cost_group = total_activity_cost * traveler_count
 
     budget = BudgetBreakdown(
         transport=transport_cost,
         accommodation=hotel_cost,
         food=food_cost,
-        activities=total_activity_cost,
+        activities=total_activity_cost_group,
         buffer=buffer,
         currency=currency,
         traveler_count=traveler_count,
@@ -350,11 +502,27 @@ def _build_itinerary_heuristic(
         currency=currency,
         selected_flight=selected_transport,
         selected_hotel=selected_hotel,
+        selected_airport_transfer=selected_airport_transfer,
+        airport_city=airport_city,
         transport=transport_legs,
         transport_alternatives=transport_alternatives,
     )
 
     return itinerary, budget
+
+
+def _transport_name_with_stops(transport: dict | None) -> str | None:
+    """Build a transport name label with stops info for flights."""
+    if not transport:
+        return None
+    name = transport.get("airline_or_operator") or transport.get("class_type") or ""
+    if not name:
+        return None
+    if transport.get("mode") == "flight":
+        stops = transport.get("stops", 0)
+        stops_label = "Non-stop" if stops == 0 else f"{stops} stop{'s' if stops > 1 else ''}"
+        return f"{name} ({stops_label})"
+    return name
 
 
 async def _generate_plan_narratives(
@@ -407,6 +575,21 @@ Return ONLY the JSON array. Anti-hallucination rule: Only reference places that 
             if content.endswith("```"):
                 content = content[:-3].strip()
         options_data = json.loads(content)
+        # Extract transport/hotel info from itinerary
+        sel_transport = itinerary.selected_flight or {}
+        sel_hotel = itinerary.selected_hotel or {}
+        sel_transfer = itinerary.selected_airport_transfer or {}
+        transport_mode = sel_transport.get("mode", "flight") if sel_transport else None
+        transport_name = _transport_name_with_stops(sel_transport)
+        hotel_name = sel_hotel.get("name") if sel_hotel else None
+        airport_transfer_str = None
+        if sel_transfer and itinerary.airport_city:
+            transfer_mode = sel_transfer.get("mode", "bus").title()
+            transfer_op = sel_transfer.get("airline_or_operator", "")
+            airport_transfer_str = f"{transfer_mode} from {itinerary.airport_city} → {itinerary.destination}"
+            if transfer_op:
+                airport_transfer_str = f"{transfer_op} ({transfer_mode}) — {itinerary.airport_city} → {itinerary.destination}"
+
         options = []
         for i, opt in enumerate(options_data):
             options.append(PlanOption(
@@ -417,10 +600,20 @@ Return ONLY the JSON array. Anti-hallucination rule: Only reference places that 
                 currency=budget.currency,
                 highlights=opt.get("highlights", []),
                 trade_offs=opt.get("description", ""),
+                transport_mode=transport_mode,
+                transport_name=transport_name,
+                hotel_name=hotel_name,
+                airport_transfer=airport_transfer_str,
             ))
         return options
     except Exception as e:
         logger.error("Plan narrative generation failed: %s", e)
+        sel_transport = itinerary.selected_flight or {}
+        sel_hotel = itinerary.selected_hotel or {}
+        sel_transfer = itinerary.selected_airport_transfer or {}
+        airport_transfer_str = None
+        if sel_transfer and itinerary.airport_city:
+            airport_transfer_str = f"{sel_transfer.get('mode', 'bus').title()} from {itinerary.airport_city} → {itinerary.destination}"
         return [PlanOption(
             id="plan_1",
             label="Recommended Plan",
@@ -429,6 +622,10 @@ Return ONLY the JSON array. Anti-hallucination rule: Only reference places that 
             currency=budget.currency,
             highlights=[f"{len(itinerary.days)} days planned", f"Total: {budget.currency} {budget.total}"],
             trade_offs=f"A {request.duration_days}-day trip to {request.destination}",
+            transport_mode=sel_transport.get("mode", "flight") if sel_transport else None,
+            transport_name=_transport_name_with_stops(sel_transport),
+            hotel_name=sel_hotel.get("name") if sel_hotel else None,
+            airport_transfer=airport_transfer_str,
         )]
 
 
@@ -473,7 +670,9 @@ async def plan(state: TripState) -> TripState:
     if isinstance(request, dict):
         request = TripRequest(**request)
 
-    # Clear replan_delta so the router won't re-trigger replan routing
+    # Clear replan_delta after reading transport_preference
+    replan_delta = state.get("replan_delta", {})
+    transport_preference = replan_delta.get("transport_preference") if isinstance(replan_delta, dict) else None
     state["replan_delta"] = {}
 
     research = state.get("research", {})
@@ -495,7 +694,7 @@ async def plan(state: TripState) -> TripState:
 
     # Step 2: Build itinerary from research using heuristics
     await sse_manager.emit_phase_update(trip_id, "planning", "scheduling", "Scheduling activities...")
-    itinerary, budget = _build_itinerary_heuristic(request, research, budget_alloc)
+    itinerary, budget = _build_itinerary_heuristic(request, research, budget_alloc, transport_preference)
 
     # Step 3: LLM narration — generate day titles/descriptions
     await sse_manager.emit_agent_step(trip_id, "planner", "Writing descriptions", "Generating day-by-day narratives with AI", "running",

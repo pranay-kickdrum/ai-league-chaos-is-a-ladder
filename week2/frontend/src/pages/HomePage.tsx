@@ -7,6 +7,7 @@ import { formatCurrency } from '../lib/utils';
 interface HomePageProps {
   onNewTrip: () => void;
   onLoadTrip: (tripId: string) => void;
+  onStartWithPrompt: (prompt: string) => void;
 }
 
 interface SampleTrip {
@@ -37,7 +38,15 @@ const SAMPLE_TRIP_DISPLAY: Record<string, { image: string; color: string; subtit
   },
 };
 
-export default function HomePage({ onNewTrip, onLoadTrip }: HomePageProps) {
+function buildSamplePrompt(trip: any): string {
+  const parts: string[] = [];
+  parts.push(`Plan a ${trip.duration_days}-day trip to ${trip.destination}`);
+  if (trip.budget) parts.push(`with a budget of ${formatCurrency(trip.budget, trip.currency || 'INR')}`);
+  if (trip.style) parts.push(`— ${trip.style}`);
+  return parts.join(' ') + '.';
+}
+
+export default function HomePage({ onNewTrip, onLoadTrip, onStartWithPrompt }: HomePageProps) {
   const [trips, setTrips] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -84,10 +93,7 @@ export default function HomePage({ onNewTrip, onLoadTrip }: HomePageProps) {
           <h2 className="text-xl font-bold text-slate-700 mb-4">Example Trips</h2>
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             {sampleTrips.map((trip) => {
-              const req = typeof trip.request_json === 'string'
-                ? JSON.parse(trip.request_json)
-                : trip.request_json;
-              const dest = req?.destination ?? 'Trip';
+              const dest = trip.destination || 'Trip';
               const display = SAMPLE_TRIP_DISPLAY[dest] ?? {
                 image: '✈️',
                 color: 'from-slate-400 to-slate-500',
@@ -98,7 +104,7 @@ export default function HomePage({ onNewTrip, onLoadTrip }: HomePageProps) {
                 <motion.button
                   key={trip.id}
                   whileHover={{ scale: 1.02 }}
-                  onClick={() => onLoadTrip(trip.id)}
+                  onClick={() => onStartWithPrompt(buildSamplePrompt(trip))}
                   className="text-left bg-white rounded-2xl overflow-hidden border border-slate-200 shadow-sm hover:shadow-md transition"
                 >
                   <div
@@ -111,11 +117,11 @@ export default function HomePage({ onNewTrip, onLoadTrip }: HomePageProps) {
                     <p className="text-xs text-slate-500">{display.subtitle}</p>
                     <div className="flex items-center gap-3 mt-2 text-xs text-slate-400">
                       <span className="flex items-center gap-0.5">
-                        <Clock className="w-3 h-3" /> {req?.duration_days ?? '?'}d
+                        <Clock className="w-3 h-3" /> {trip.duration_days || '?'}d
                       </span>
                       <span className="flex items-center gap-0.5">
                         <Wallet className="w-3 h-3" />{' '}
-                        {formatCurrency(req?.budget ?? 0, req?.currency ?? 'INR')}
+                        {formatCurrency(trip.budget ?? 0, trip.currency ?? 'INR')}
                       </span>
                     </div>
                   </div>
@@ -135,11 +141,7 @@ export default function HomePage({ onNewTrip, onLoadTrip }: HomePageProps) {
         >
           <h2 className="text-xl font-bold text-slate-700 mb-4">Your Trips</h2>
           <div className="space-y-2">
-            {userTrips.map((trip) => {
-              const req = typeof trip.request_json === 'string'
-                ? JSON.parse(trip.request_json)
-                : trip.request_json;
-              return (
+            {userTrips.map((trip) => (
                 <button
                   key={trip.id}
                   onClick={() => onLoadTrip(trip.id)}
@@ -149,7 +151,7 @@ export default function HomePage({ onNewTrip, onLoadTrip }: HomePageProps) {
                     <MapPin className="w-5 h-5 text-ocean" />
                     <div className="text-left">
                       <p className="text-sm font-medium text-slate-800">
-                        {req?.destination ?? 'Unknown'}
+                        {trip.destination || 'Unknown'}
                       </p>
                       <p className="text-xs text-slate-400">
                         {trip.status} · {new Date(trip.created_at).toLocaleDateString()}
@@ -158,8 +160,7 @@ export default function HomePage({ onNewTrip, onLoadTrip }: HomePageProps) {
                   </div>
                   <span className="text-xs text-slate-400">→</span>
                 </button>
-              );
-            })}
+              ))}
           </div>
         </motion.div>
       )}

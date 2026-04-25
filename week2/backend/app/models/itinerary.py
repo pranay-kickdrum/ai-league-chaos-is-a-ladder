@@ -92,5 +92,7 @@ class Itinerary(BaseModel):
     summary: str = ""
     selected_flight: Optional[dict] = None  # selected transport (any mode)
     selected_hotel: Optional[dict] = None
+    selected_airport_transfer: Optional[dict] = None  # connecting transport from airport city
+    airport_city: str = ""  # e.g. "Kochi" when destination is Munnar
     transport: list[TransportLeg] = Field(default_factory=list)
     transport_alternatives: Optional[dict] = None  # mode -> best option per mode

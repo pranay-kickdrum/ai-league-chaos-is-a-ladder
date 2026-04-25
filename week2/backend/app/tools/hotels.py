@@ -80,13 +80,14 @@ async def search_hotels(
         raw = await _search_hotels_serpapi(destination, check_in, check_out, currency)
         for i, h in enumerate(raw[:10]):
             rate = h.get("rate_per_night", {})
-            price = float(
-                str(rate.get("lowest", "0"))
-                .replace(",", "")
-                .replace("₹", "")
-                .replace("$", "")
-                or 0
-            )
+            # Prefer the clean numeric field; fall back to string parsing
+            price = rate.get("extracted_lowest") or 0
+            if not price:
+                raw_str = str(rate.get("lowest", "0")).replace(",", "").replace("₹", "").replace("$", "")
+                try:
+                    price = float(raw_str) if raw_str else 0
+                except ValueError:
+                    price = 0
             options.append(
                 HotelOption(
                     id=f"hotel-serp-{i}",

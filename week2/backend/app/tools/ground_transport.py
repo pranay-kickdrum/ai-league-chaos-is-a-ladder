@@ -92,7 +92,8 @@ async def search_trains(
     for i, cls in enumerate(_TRAIN_CLASSES):
         effective_speed = base_speed_kmh / cls["speed_factor"]
         duration = int(rail_distance / effective_speed * 60)
-        price = round(rail_distance * cls["rate_per_km"] * fx, 0)
+        one_way_price = round(rail_distance * cls["rate_per_km"] * fx, 0)
+        price = one_way_price * 2  # Round-trip
 
         # Time-based departure slots
         dep_hour = 6 + (i * 4)  # 06:00, 10:00, 14:00, 18:00
@@ -165,7 +166,8 @@ async def search_buses(
         # Use actual road duration if available and reasonable
         if road_duration > 0:
             duration = max(duration, int(road_duration * cls["speed_factor"]))
-        price = round(distance_km * cls["rate_per_km"] * fx, 0)
+        one_way_price = round(distance_km * cls["rate_per_km"] * fx, 0)
+        price = one_way_price * 2  # Round-trip
 
         # Departure slots
         dep_hour = 7 + (i * 5)  # 07:00, 12:00, 17:00

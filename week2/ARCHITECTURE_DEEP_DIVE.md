@@ -409,7 +409,7 @@ flowchart TD
     subgraph PlanningSteps ["Planning Pipeline"]
         direction TB
         P1[Budget Allocation<br/>by travel style ratios]
-        P2[Transport Selection<br/>cheapest affordable]
+        P2[Transport Selection<br/>cheapest affordable<br/>or user-preferred mode]
         P3[Hotel Selection<br/>highest-rated affordable]
         P4[Activity Distribution<br/>round-robin, max 3/day]
         P5[Time Slot Scheduling<br/>9AM–9PM, 1h gaps]
@@ -420,25 +420,26 @@ flowchart TD
 
     Plan --> PlanningSteps
     PlanningSteps --> Optimize[Optimizer<br/>Greedy budget rebalancing]
-    Optimize --> CP1{{"🔒 Checkpoint 1<br/>Plan Direction<br/>awaiting_human=true"}}
+    Optimize --> CP1{{"🔒 Checkpoint 1<br/>Plan Direction + Selection<br/>Emits recommended_transport_id<br/>& recommended_hotel_id<br/>User selects from Research Panel"}}
 
-    CP1 -->|"approve"| CP2{{"🔒 Checkpoint 2<br/>Budget Approval<br/>awaiting_human=true"}}
+    CP1 -->|"select plan<br/>+ transport/hotel selections"| CP2{{"🔒 Checkpoint 2<br/>Budget Approval<br/>Applies user transport/hotel<br/>selections via _apply_user_selections"}}
+    CP1 -->|"chat replan<br/>e.g. 'I prefer flights'"| Replan[Replanner<br/>GPT-4o + mode normalization]
     CP1 -->|"adjust prefs"| Research
     CP1 -->|"cancel"| END1([END])
 
     CP2 -->|"approve"| Verify[Verifier<br/>Google Places + URL checks]
-    CP2 -->|"request changes"| Replan[Replanner<br/>GPT-4o]
+    CP2 -->|"request changes"| Replan
     CP2 -->|"cancel"| END2([END])
 
-    Verify --> CP3{{"🔒 Checkpoint 3<br/>Final Review<br/>+ Price Re-validation<br/>awaiting_human=true"}}
+    Verify --> CP3{{"🔒 Checkpoint 3<br/>Final Review + Price Re-validation<br/>Booking costs × traveler_count<br/>for transport & activities"}}
 
-    CP3 -->|"confirm"| Finalize[Finalizer<br/>BookingCart + TripPackage]
+    CP3 -->|"confirm"| Finalize[Finalizer<br/>BookingCart × traveler_count<br/>+ TripPackage]
     CP3 -->|"request changes"| Replan
     CP3 -->|"cancel"| END3([END])
 
     Replan --> ReplanRoute{Re-research<br/>needed?}
     ReplanRoute -->|Yes| Research
-    ReplanRoute -->|No| Plan
+    ReplanRoute -->|"No · normalize mode<br/>e.g. 'flights'→'flight'"| Plan
 
     Finalize --> Done([✅ Trip Complete<br/>SSE: complete event])
 ```
@@ -524,31 +525,32 @@ flowchart TD
     ResearchGate --> ParallelBlock
     ParallelBlock --> Aggregate["Aggregate Results<br/>Individual failures isolated"]
 
-    Aggregate --> PlanH["⬇️ SEQUENTIAL<br/>Planner — Heuristic Phase<br/>⚙️ No LLM · instant<br/>Budget split → Transport → Hotel<br/>→ Activity scheduling → Time slots"]
+    Aggregate --> PlanH["⬇️ SEQUENTIAL<br/>Planner — Heuristic Phase<br/>⚙️ No LLM · instant<br/>Budget split → Transport (respects<br/>user preference) → Hotel<br/>→ Activity scheduling → Time slots"]
 
     PlanH --> PlanLLM["⬇️ SEQUENTIAL<br/>Planner — Narration Phase<br/>🧠 GPT-4o-mini<br/>Day descriptions + 2 plan options"]
 
     PlanLLM --> Opt["⬇️ SEQUENTIAL<br/>Optimizer<br/>⚙️ No LLM · greedy algorithm<br/>Swap expensive → cheaper alternatives"]
 
-    Opt --> CP1{{"🔒 CHECKPOINT 1<br/>Plan Direction<br/>⏸️ Graph pauses · state → DB"}}
+    Opt --> CP1{{"🔒 CHECKPOINT 1<br/>Plan Direction + Selection<br/>⏸️ Emits recommended IDs<br/>User picks transport/hotel"}}
 
-    CP1 -->|"approve"| CP2{{"🔒 CHECKPOINT 2<br/>Budget Approval<br/>⏸️ Graph pauses · state → DB"}}
+    CP1 -->|"select plan<br/>+ selections"| CP2{{"🔒 CHECKPOINT 2<br/>Budget Approval<br/>⏸️ Applies user selections<br/>then shows budget"}}
+    CP1 -->|"chat replan<br/>e.g. 'prefer flights'"| Replan["⬇️ SEQUENTIAL<br/>Replanner<br/>🧠 GPT-4o · interpret change<br/>Normalize mode · compute delta"]
     CP1 -->|"adjust prefs"| QueryGen
     CP1 -->|"cancel"| END1([END])
 
     CP2 -->|"approve"| Ver["⬇️ SEQUENTIAL<br/>Verifier<br/>⚙️ No LLM<br/>Google Places cross-ref + URL checks"]
-    CP2 -->|"request changes"| Replan["⬇️ SEQUENTIAL<br/>Replanner<br/>🧠 GPT-4o · interpret change<br/>Compute minimal delta"]
+    CP2 -->|"request changes"| Replan
     CP2 -->|"cancel"| END2([END])
 
-    Ver --> CP3{{"🔒 CHECKPOINT 3<br/>Final Review + Price Re-validation<br/>⏸️ Re-check flight & hotel prices"}}
+    Ver --> CP3{{"🔒 CHECKPOINT 3<br/>Final Review + Price Re-validation<br/>⏸️ Costs × traveler_count"}}
 
-    CP3 -->|"confirm"| Fin["⬇️ SEQUENTIAL<br/>Finalizer<br/>⚙️ No LLM<br/>BookingCart + TripPackage"]
+    CP3 -->|"confirm"| Fin["⬇️ SEQUENTIAL<br/>Finalizer<br/>⚙️ No LLM<br/>BookingCart × traveler_count"]
     CP3 -->|"request changes"| Replan
     CP3 -->|"cancel"| END3([END])
 
     Replan --> ReplanRoute{Re-research<br/>needed?}
     ReplanRoute -->|"Yes"| QueryGen
-    ReplanRoute -->|"No · reuse data"| PlanH
+    ReplanRoute -->|"No · normalize mode<br/>'flights'→'flight'"| PlanH
 
     Fin --> Done([✅ Trip Complete])
 

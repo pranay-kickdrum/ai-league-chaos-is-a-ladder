@@ -215,6 +215,70 @@ def city_to_iata(city: str) -> str | None:
     return CITY_TO_IATA.get(city.lower().strip())
 
 
+# Build reverse mapping: IATA code → canonical city name (first match wins)
+_IATA_TO_CITY: dict[str, str] = {}
+_seen_codes: set[str] = set()
+for _city, _code in CITY_TO_IATA.items():
+    if _code not in _seen_codes:
+        _IATA_TO_CITY[_code] = _city.title()
+        _seen_codes.add(_code)
+
+
+def iata_to_city(code: str) -> str | None:
+    """Convert an IATA airport code to its city name. Returns None if unknown."""
+    return _IATA_TO_CITY.get(code.upper().strip())
+
+
+def airport_city_for(destination: str) -> str | None:
+    """Return the airport city if the destination's nearest airport is in a different city.
+
+    Returns the airport city name (e.g. "Kochi" for destination "Munnar"),
+    or None if the destination has its own airport (e.g. "Delhi" → None).
+    """
+    dest_lower = destination.lower().strip()
+    iata = CITY_TO_IATA.get(dest_lower)
+    if not iata:
+        return None
+    airport_city = _IATA_TO_CITY.get(iata)
+    if not airport_city:
+        return None
+    if airport_city.lower() == dest_lower:
+        return None
+    # Check if destination is a known alias (same physical city, different name)
+    if dest_lower in _AIRPORT_ALIASES.get(iata, set()):
+        return None
+    return airport_city
+
+
+# Aliases: city names that are alternate names for the SAME physical airport city.
+# Entries NOT listed here that share an IATA code are assumed to be different
+# cities that use a nearby airport (e.g. Munnar → COK is NOT an alias of Kochi).
+_AIRPORT_ALIASES: dict[str, set[str]] = {
+    "BOM": {"mumbai", "bombay"},
+    "DEL": {"delhi", "new delhi"},
+    "MAA": {"chennai", "madras"},
+    "CCU": {"kolkata", "calcutta"},
+    "COK": {"kochi", "cochin"},
+    "VTZ": {"visakhapatnam", "vizag"},
+    "BLR": {"bangalore", "bengaluru"},
+    "IXE": {"mangalore", "mangaluru"},
+    "IXG": {"belgaum", "belagavi"},
+    "MYQ": {"mysore", "mysuru"},
+    "TRZ": {"trichy", "tiruchirappalli"},
+    "VNS": {"varanasi", "banaras"},
+    "IXB": {"bagdogra", "siliguri"},
+    "IXZ": {"port blair", "andaman"},
+    "KUU": {"kullu", "kullu manali"},
+    "DMU": {"kohima", "dimapur"},
+    "DPS": {"bali", "denpasar"},
+    "SGN": {"ho chi minh", "saigon"},
+    "JFK": {"new york", "nyc"},
+    "LAX": {"los angeles", "la"},
+    "KUL": {"kuala lumpur", "kl"},
+    "IAD": {"washington", "dc"},
+}
+
+
 def resolve_iata(city: str) -> str:
     """Return IATA code for a city, or the original string if not found.
 

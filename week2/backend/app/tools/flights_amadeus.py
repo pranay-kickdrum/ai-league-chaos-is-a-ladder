@@ -108,16 +108,39 @@ async def search_flights_amadeus(
     try:
         raw = await _search_amadeus(origin, destination, departure_date, adults, currency)
         for i, offer in enumerate(raw[:10]):
-            price = float(offer.get("price", {}).get("total", 0))
+            one_way_price = float(offer.get("price", {}).get("total", 0))
+            price = one_way_price * 2  # Round-trip (Amadeus returns one-way)
             segments = (
-                offer.get("itineraries", [{}])[0].get("segments", [{}])
+                offer.get("itineraries", [{}])[0].get("segments", [])
                 if offer.get("itineraries")
-                else [{}]
+                else []
             )
             first_seg = segments[0] if segments else {}
-            carrier = first_seg.get("carrierCode", "")
+            last_seg = segments[-1] if segments else first_seg
+
+            # Collect unique carriers across all segments
+            carriers: list[str] = []
+            seen_carriers: set[str] = set()
+            for seg in segments:
+                cc = seg.get("carrierCode", "")
+                if cc and cc not in seen_carriers:
+                    carriers.append(cc)
+                    seen_carriers.add(cc)
+
             dep_time = first_seg.get("departure", {}).get("at", "")
-            arr_time = first_seg.get("arrival", {}).get("at", "")
+            arr_time = last_seg.get("arrival", {}).get("at", "")
+
+            # Number of stops = segments - 1
+            num_stops = max(len(segments) - 1, 0)
+
+            # Build layover info from connection points
+            layover_parts: list[str] = []
+            for s_idx in range(len(segments) - 1):
+                conn_airport = segments[s_idx].get("arrival", {}).get("iataCode", "")
+                if conn_airport:
+                    layover_parts.append(conn_airport)
+            layover_info = ", ".join(layover_parts)
+
             duration_str = offer.get("itineraries", [{}])[0].get("duration", "")
 
             # Parse ISO duration PT2H30M -> minutes
@@ -133,10 +156,12 @@ async def search_flights_amadeus(
                 FlightOption(
                     id=f"flight-amadeus-{i}",
                     mode="flight",
-                    airline_or_operator=carrier,
+                    airline_or_operator=", ".join(carriers) if carriers else "",
                     departure_time=dep_time,
                     arrival_time=arr_time,
                     duration_minutes=dur_mins,
+                    stops=num_stops,
+                    layover_info=layover_info,
                     from_location=origin,
                     to_location=destination,
                     price=price,

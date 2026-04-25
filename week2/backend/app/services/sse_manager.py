@@ -73,8 +73,8 @@ class SSEManager:
     async def emit_research_partial(self, trip_id: str, source: str, data: Any) -> None:
         await self.emit(trip_id, "research_partial", {"source": source, "data": data})
 
-    async def emit_api_degraded(self, trip_id: str, source: str, fallback: str) -> None:
-        await self.emit(trip_id, "api_degraded", {"source": source, "fallback_used": fallback})
+    async def emit_api_degraded(self, trip_id: str, source: str, fallback: str, reason: str = "") -> None:
+        await self.emit(trip_id, "api_degraded", {"source": source, "fallback_used": fallback, "reason": reason})
 
     async def emit_checkpoint(self, trip_id: str, data: Any) -> None:
         await self.emit(trip_id, "checkpoint", data)

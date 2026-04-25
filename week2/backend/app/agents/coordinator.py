@@ -56,6 +56,108 @@ MIN_COST_PER_DAY: dict[str, float] = {
 DEFAULT_MIN_PER_DAY = 2500
 
 
+def _extract_id(itinerary: Any, key: str) -> str | None:
+    """Safely pull the 'id' from an itinerary selection dict."""
+    if isinstance(itinerary, dict):
+        sel = itinerary.get(key)
+        if isinstance(sel, dict):
+            return sel.get("id")
+    return None
+
+
+def _find_transport_by_id(research: dict, transport_id: str) -> dict | None:
+    """Look up a transport option by ID across flights, trains, and buses."""
+    for category in ("flights", "trains", "buses"):
+        for item in research.get(category, []):
+            raw = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+            if raw.get("id") == transport_id:
+                return raw
+    return None
+
+
+def _find_hotel_by_id(research: dict, hotel_id: str) -> dict | None:
+    """Look up a hotel option by ID."""
+    for item in research.get("hotels", []):
+        raw = item.model_dump(mode="json") if hasattr(item, "model_dump") else item
+        if raw.get("id") == hotel_id:
+            return raw
+    return None
+
+
+def _apply_user_selections(state: TripState) -> None:
+    """Apply user transport/hotel selections from CP1 modifications onto the itinerary and budget."""
+    decision = state.get("checkpoint_decision", {})
+    if not isinstance(decision, dict):
+        return
+    mods = decision.get("modifications")
+    if not mods or not isinstance(mods, dict):
+        return
+
+    itinerary = state.get("itinerary")
+    if not isinstance(itinerary, dict):
+        return
+    research = state.get("research", {})
+
+    sel_transport_id = mods.get("selected_transport_id")
+    sel_hotel_id = mods.get("selected_hotel_id")
+
+    # ── Transport swap ──
+    if sel_transport_id:
+        current_id = _extract_id(itinerary, "selected_flight")
+        if sel_transport_id != current_id:
+            new_transport = _find_transport_by_id(research, sel_transport_id)
+            if new_transport:
+                old_mode = (itinerary.get("selected_flight") or {}).get("mode", "flight")
+                new_mode = new_transport.get("mode", "flight")
+                itinerary["selected_flight"] = new_transport
+                logger.info("User selected transport %s (%s) replacing %s", sel_transport_id, new_mode, current_id)
+
+                # If switching away from flight mode, clear airport transfer
+                if old_mode == "flight" and new_mode != "flight":
+                    itinerary.pop("selected_airport_transfer", None)
+
+                # Update budget transport cost (price is per-person; budget stores group total)
+                budget = state.get("budget_breakdown")
+                if isinstance(budget, dict):
+                    request = state.get("request")
+                    if isinstance(request, dict):
+                        tc = max(request.get("traveler_count", 1), 1)
+                    else:
+                        tc = max(getattr(request, "traveler_count", 1), 1)
+                    budget["transport"] = new_transport.get("price", 0) * tc
+                    _recalc_budget_total(budget)
+
+    # ── Hotel swap ──
+    if sel_hotel_id:
+        current_id = _extract_id(itinerary, "selected_hotel")
+        if sel_hotel_id != current_id:
+            new_hotel = _find_hotel_by_id(research, sel_hotel_id)
+            if new_hotel:
+                itinerary["selected_hotel"] = new_hotel
+                logger.info("User selected hotel %s replacing %s", sel_hotel_id, current_id)
+
+                # Update budget accommodation cost
+                budget = state.get("budget_breakdown")
+                if isinstance(budget, dict):
+                    request = state.get("request")
+                    if isinstance(request, dict):
+                        nights = max(request.get("duration_days", 2) - 1, 1)
+                    else:
+                        nights = max(getattr(request, "duration_days", 2) - 1, 1)
+                    budget["accommodation"] = new_hotel.get("price_per_night", 0) * nights
+                    _recalc_budget_total(budget)
+
+
+def _recalc_budget_total(budget: dict) -> None:
+    """Recalculate the total from category fields."""
+    budget["total"] = sum(
+        budget.get(k, 0) for k in ("transport", "accommodation", "food", "activities", "buffer")
+    )
+    tc = budget.get("traveler_count", 1) or 1
+    if tc > 1:
+        budget["per_person_total"] = round(budget["total"] / tc, 2)
+
+
 def check_budget_feasibility(request: TripRequest) -> dict:
     """Check if budget is realistic for the destination, duration, and group size."""
     dest_lower = request.destination.lower().strip()
@@ -151,6 +253,8 @@ async def checkpoint_1(state: TripState) -> TripState:
             "hotels": hotels_data,
             "activities": activities_data,
         },
+        "recommended_transport_id": _extract_id(itinerary, "selected_flight"),
+        "recommended_hotel_id": _extract_id(itinerary, "selected_hotel"),
         "options": ["select_plan", "request_changes", "cancel"],
     }
 
@@ -195,6 +299,9 @@ async def checkpoint_2(state: TripState) -> TripState:
     request = state.get("request")
     if isinstance(request, dict):
         request = TripRequest(**request)
+
+    # ── Apply user transport/hotel selections from CP1 ──
+    _apply_user_selections(state)
 
     budget = state.get("budget_breakdown", {})
     itinerary = state.get("itinerary", {})
@@ -326,6 +433,7 @@ async def checkpoint_3(state: TripState) -> TripState:
     # Emit checkpoint
     # Build structured booking options for the booking cart UI
     booking_options: list[dict] = []
+    traveler_count = max(request.traveler_count, 1)
 
     # Travel option
     selected_flight = itinerary.get("selected_flight") if isinstance(itinerary, dict) else None
@@ -334,19 +442,22 @@ async def checkpoint_3(state: TripState) -> TripState:
         transport_icon = {"flight": "plane", "train": "train", "bus": "bus"}.get(transport_mode, "plane")
         duration_mins = selected_flight.get("duration_minutes", 0)
         duration_str = f"{duration_mins // 60}h {duration_mins % 60}m" if duration_mins else ""
+        transport_cost_pp = selected_flight.get("price", 0)
+        transport_cost_total = transport_cost_pp * traveler_count
         booking_options.append({
             "category": "travel",
             "icon": transport_icon,
             "name": selected_flight.get("airline_or_operator", "Transport"),
             "route": f"{request.origin} → {request.destination}",
             "mode": transport_mode,
-            "cost": selected_flight.get("price", 0),
+            "cost": transport_cost_total,
             "currency": request.currency,
             "details": [
                 d for d in [
                     f"Departure: {selected_flight.get('departure_time', '')}" if selected_flight.get("departure_time") else None,
                     f"Duration: {duration_str}" if duration_str else None,
                     f"Class: {selected_flight.get('class_type', '')}" if selected_flight.get("class_type") else None,
+                    f"{request.currency} {transport_cost_pp:,.0f}/person × {traveler_count} travelers" if traveler_count > 1 else None,
                 ] if d
             ],
             "booking_url": selected_flight.get("booking_url", ""),
@@ -378,6 +489,7 @@ async def checkpoint_3(state: TripState) -> TripState:
         })
 
     # Activity options — pick top bookable activities from itinerary
+    # Activity costs in itinerary are per-person; multiply by traveler count for total
     if isinstance(itinerary, dict):
         seen_names: set[str] = set()
         for day in itinerary.get("days", []):
@@ -385,11 +497,13 @@ async def checkpoint_3(state: TripState) -> TripState:
                 act_name = act.get("name", "")
                 if act_name and act_name not in seen_names and act.get("cost", 0) > 0:
                     seen_names.add(act_name)
+                    act_cost_pp = act.get("cost", 0)
+                    act_cost_total = act_cost_pp * traveler_count
                     booking_options.append({
                         "category": "activity",
                         "icon": "activity",
                         "name": act_name,
-                        "cost": act.get("cost", 0),
+                        "cost": act_cost_total,
                         "currency": request.currency,
                         "day": day.get("day_number"),
                         "details": [
@@ -444,15 +558,17 @@ async def finalize(state: TripState) -> TripState:
 
     # Build booking cart
     booking_items: list[dict] = []
+    traveler_count = max(request.traveler_count, 1)
 
     if isinstance(itinerary, dict):
         flight = itinerary.get("selected_flight")
         if flight:
+            transport_cost_pp = flight.get("price", 0)
             booking_items.append({
                 "id": f"booking-flight-{trip_id[:8]}",
                 "category": "flight",
                 "name": f"Flight: {flight.get('airline_or_operator', 'Flight')} to {request.destination}",
-                "price": flight.get("price", 0),
+                "price": transport_cost_pp * traveler_count,
                 "currency": request.currency,
                 "booking_url": flight.get("booking_url", ""),
             })

@@ -148,9 +148,11 @@ export function useTrip() {
         dispatch({ type: 'ADD_CHAT', message: { role: 'system', content: `Found ${data.source} results` } });
         break;
 
-      case 'api_degraded':
-        dispatch({ type: 'ADD_CHAT', message: { role: 'system', content: `⚠️ ${data.source} unavailable, using ${data.fallback_used}` } });
+      case 'api_degraded': {
+        const reason = data.reason ? ` (${data.reason})` : '';
+        dispatch({ type: 'ADD_CHAT', message: { role: 'system', content: `⚠️ ${data.source}${reason}, trying ${data.fallback_used}` } });
         break;
+      }
 
       case 'price_changed':
         dispatch({ type: 'ADD_PRICE_CHANGE', change: data });

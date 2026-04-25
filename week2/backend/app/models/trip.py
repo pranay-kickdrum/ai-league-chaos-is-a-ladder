@@ -81,6 +81,10 @@ class PlanOption(BaseModel):
     highlights: list[str] = Field(default_factory=list)
     trade_offs: str = ""  # "Cheaper but more travel time"
     is_recommended: bool = False
+    transport_mode: Optional[str] = None   # "flight" | "train" | "bus"
+    transport_name: Optional[str] = None   # e.g. "Air India" or "AC 3 Tier"
+    hotel_name: Optional[str] = None       # e.g. "Hotel Himalaya"
+    airport_transfer: Optional[str] = None  # e.g. "Bus from Kochi → Munnar"
 
 
 class TripStatus(str, Enum):

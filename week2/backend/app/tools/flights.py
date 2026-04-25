@@ -32,6 +32,7 @@ async def _search_flights_serpapi(
         "departure_id": origin,
         "arrival_id": destination,
         "outbound_date": departure_date,
+        "type": "1",  # Round-trip
         "currency": currency,
         "hl": "en",
         "api_key": settings.SERPAPI_API_KEY,
@@ -79,16 +80,41 @@ async def search_flights(
         for i, flight in enumerate(raw[:10]):  # Cap at 10 results
             flights_list = flight.get("flights", [{}])
             first_leg = flights_list[0] if flights_list else {}
+            last_leg = flights_list[-1] if flights_list else first_leg
             price_val = flight.get("price", 0)
+
+            # Number of stops = number of legs - 1
+            num_stops = max(len(flights_list) - 1, 0)
+
+            # Build layover info from SerpAPI layovers array
+            layover_parts: list[str] = []
+            for lo in flight.get("layovers", []):
+                lo_dur = lo.get("duration", 0)
+                lo_name = lo.get("name", lo.get("id", ""))
+                if lo_dur and lo_name:
+                    h, m = divmod(lo_dur, 60)
+                    layover_parts.append(f"{h}h {m}m in {lo_name}")
+            layover_info = "; ".join(layover_parts)
+
+            # Collect unique airlines across all legs
+            airlines = []
+            seen: set[str] = set()
+            for leg in flights_list:
+                al = leg.get("airline", "")
+                if al and al not in seen:
+                    airlines.append(al)
+                    seen.add(al)
 
             options.append(
                 FlightOption(
                     id=f"flight-serp-{i}",
                     mode="flight",
-                    airline_or_operator=first_leg.get("airline", ""),
+                    airline_or_operator=", ".join(airlines) if airlines else "",
                     departure_time=first_leg.get("departure_airport", {}).get("time", ""),
-                    arrival_time=first_leg.get("arrival_airport", {}).get("time", ""),
+                    arrival_time=last_leg.get("arrival_airport", {}).get("time", ""),
                     duration_minutes=flight.get("total_duration", 0),
+                    stops=num_stops,
+                    layover_info=layover_info,
                     from_location=origin,
                     to_location=destination,
                     price=price_val,

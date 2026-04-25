@@ -1,7 +1,7 @@
 import { motion } from 'framer-motion';
-import { CheckCircle, XCircle, RotateCcw, MapPin, Calendar, Users, Wallet, Compass, ExternalLink, AlertTriangle } from 'lucide-react';
+import { CheckCircle, XCircle, RotateCcw, MapPin, Calendar, Users, Wallet, Compass, ExternalLink, AlertTriangle, Plane, Train, Bus, Hotel } from 'lucide-react';
 import { formatCurrency } from '../../lib/utils';
-import type { BookingOption, CheckpointData } from '../../types';
+import type { BookingOption, CheckpointData, ResearchFlight, ResearchHotel } from '../../types';
 
 /* ── Booking card sub-component for CP3 ── */
 
@@ -63,11 +63,20 @@ function BookingCard({ option, emoji, sectionTitle }: { option: BookingOption; e
 
 interface ApprovalCardProps {
   checkpoint: CheckpointData;
-  onAction: (action: string) => void;
+  onAction: (action: string, metadata?: Record<string, string>) => void;
+  selectedTransport?: ResearchFlight;
+  selectedHotel?: ResearchHotel;
 }
 
-export default function ApprovalCard({ checkpoint, onAction }: ApprovalCardProps) {
+export default function ApprovalCard({ checkpoint, onAction, selectedTransport, selectedHotel }: ApprovalCardProps) {
   const { type } = checkpoint;
+
+  const handlePlanSelect = (planId: string) => {
+    const metadata: Record<string, string> = {};
+    if (selectedTransport?.id) metadata.selected_transport_id = selectedTransport.id;
+    if (selectedHotel?.id) metadata.selected_hotel_id = selectedHotel.id;
+    onAction(`select_plan:${planId}`, Object.keys(metadata).length > 0 ? metadata : undefined);
+  };
 
   return (
     <motion.div
@@ -148,11 +157,37 @@ export default function ApprovalCard({ checkpoint, onAction }: ApprovalCardProps
 
           {/* Plan Options */}
           <h5 className="text-xs font-semibold text-ocean uppercase tracking-wider mb-2">Proposed Plan Options</h5>
-          {checkpoint.plan_options?.map((opt, idx) => (
+          {checkpoint.plan_options?.map((opt, idx) => {
+            // Compute adjusted total when user picks different transport/hotel
+            // Transport prices in research are per-person; estimated_total includes cost for all travelers
+            const travelerCount = Math.max(checkpoint.trip_understanding?.traveler_count ?? 1, 1);
+            const origTransportPricePP = checkpoint.research
+              ? [...(checkpoint.research.flights ?? []), ...(checkpoint.research.trains ?? []), ...(checkpoint.research.buses ?? [])]
+                  .find(t => t.id === checkpoint.recommended_transport_id)?.price ?? 0
+              : 0;
+            const origHotelPpn = checkpoint.research?.hotels?.find(h => h.id === checkpoint.recommended_hotel_id)?.price_per_night ?? 0;
+            const nights = Math.max((checkpoint.trip_understanding?.duration_days ?? 2) - 1, 1);
+
+            let adjustedTotal = opt.estimated_total ?? 0;
+            if (selectedTransport && selectedTransport.id !== checkpoint.recommended_transport_id) {
+              adjustedTotal = adjustedTotal - (origTransportPricePP * travelerCount) + (selectedTransport.price * travelerCount);
+            }
+            if (selectedHotel && selectedHotel.id !== checkpoint.recommended_hotel_id) {
+              adjustedTotal = adjustedTotal - (origHotelPpn * nights) + (selectedHotel.price_per_night * nights);
+            }
+
+            // Display names: use user selection if different, otherwise plan's original
+            const displayTransportMode = selectedTransport?.mode ?? opt.transport_mode;
+            const displayTransportName = selectedTransport
+              ? `${selectedTransport.airline_or_operator}${selectedTransport.class_type ? ' — ' + selectedTransport.class_type : ''}`
+              : opt.transport_name;
+            const displayHotelName = selectedHotel?.name ?? opt.hotel_name;
+
+            return (
             <div
               key={opt.id}
               className="bg-slate-50 rounded-lg p-3 mb-2 hover:bg-slate-100 cursor-pointer transition border border-transparent hover:border-ocean/30"
-              onClick={() => onAction(`select_plan:${opt.id}`)}
+              onClick={() => handlePlanSelect(opt.id)}
             >
               <div className="flex justify-between items-start">
                 <div className="flex items-center gap-2">
@@ -162,10 +197,33 @@ export default function ApprovalCard({ checkpoint, onAction }: ApprovalCardProps
                   <h5 className="font-medium text-slate-800">{opt.label}</h5>
                 </div>
                 <span className="text-sm font-bold text-sunset">
-                  {formatCurrency(opt.estimated_total ?? 0, opt.currency)}
+                  {formatCurrency(adjustedTotal, opt.currency)}
                 </span>
               </div>
               <p className="text-xs text-slate-500 mt-1 ml-8">{opt.trade_offs}</p>
+              {/* Transport & Hotel badges */}
+              {(displayTransportMode || displayHotelName || opt.airport_transfer) && (
+                <div className="flex flex-wrap gap-2 mt-2 ml-8">
+                  {displayTransportMode && (
+                    <span className="inline-flex items-center gap-1 text-[10px] bg-blue-50 text-blue-700 px-2 py-0.5 rounded-full font-medium">
+                      {displayTransportMode === 'train' ? <Train className="w-3 h-3" /> : displayTransportMode === 'bus' ? <Bus className="w-3 h-3" /> : <Plane className="w-3 h-3" />}
+                      {displayTransportName || displayTransportMode}
+                    </span>
+                  )}
+                  {opt.airport_transfer && (
+                    <span className="inline-flex items-center gap-1 text-[10px] bg-purple-50 text-purple-700 px-2 py-0.5 rounded-full font-medium">
+                      <Bus className="w-3 h-3" />
+                      {opt.airport_transfer}
+                    </span>
+                  )}
+                  {displayHotelName && (
+                    <span className="inline-flex items-center gap-1 text-[10px] bg-amber-50 text-amber-700 px-2 py-0.5 rounded-full font-medium">
+                      <Hotel className="w-3 h-3" />
+                      {displayHotelName}
+                    </span>
+                  )}
+                </div>
+              )}
               {opt.highlights && opt.highlights.length > 0 && (
                 <div className="flex flex-wrap gap-1 mt-2 ml-8">
                   {opt.highlights.map((h, i) => (
@@ -181,7 +239,8 @@ export default function ApprovalCard({ checkpoint, onAction }: ApprovalCardProps
                 </span>
               )}
             </div>
-          ))}
+            );
+          })}
 
           {checkpoint.research_summary && (
             <p className="text-[11px] text-slate-400 mt-2 text-center">

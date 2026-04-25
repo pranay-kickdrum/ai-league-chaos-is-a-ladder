@@ -51,6 +51,10 @@ export interface PlanOption {
   highlights: string[];
   trade_offs: string;
   is_recommended: boolean;
+  transport_mode?: string;   // "flight" | "train" | "bus"
+  transport_name?: string;   // e.g. "Air India" or "AC 3 Tier"
+  hotel_name?: string;       // e.g. "Hotel Himalaya"
+  airport_transfer?: string; // e.g. "Bus from Kochi → Munnar"
 }
 
 export interface Activity {
@@ -205,6 +209,8 @@ export interface CheckpointData {
   price_changes?: PriceChange[];
   travel_advisory?: Record<string, any>;
   research?: ResearchData;
+  recommended_transport_id?: string;
+  recommended_hotel_id?: string;
 }
 
 export interface PriceChange {
@@ -214,6 +220,7 @@ export interface PriceChange {
 }
 
 export interface ResearchFlight {
+  id?: string;
   airline_or_operator: string;
   price: number;
   currency: string;
@@ -222,6 +229,7 @@ export interface ResearchFlight {
   duration?: string;
   duration_minutes?: number;
   stops?: number;
+  layover_info?: string;
   source?: string;
   from_location?: string;
   to_location?: string;
@@ -231,6 +239,7 @@ export interface ResearchFlight {
 }
 
 export interface ResearchHotel {
+  id?: string;
   name: string;
   price_per_night: number;
   total_price?: number;

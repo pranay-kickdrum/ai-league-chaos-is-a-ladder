@@ -50,8 +50,10 @@ Change request: "{change_text}"
 Return a JSON object with:
 {{
   "affected_days": [1, 2],       // which day numbers need changes (empty = all)
-  "change_type": "swap_activity|change_hotel|change_flight|extend_trip|shorten_trip|change_budget|change_destination|reschedule|other",
-  "needs_re_research": true/false,  // does this need fresh API calls?
+  "change_type": "swap_activity|change_hotel|change_transport|prefer_transport_mode|extend_trip|shorten_trip|change_budget|change_destination|reschedule|other",
+  "re_research_categories": [],   // which categories need fresh API calls: "transport", "hotels", "activities", "weather", "all". Empty array means no re-research needed.
+  "transport_preference": null,   // if user prefers a transport mode: "flight", "train", "bus", or null
+  "hotel_preference": null,       // if user prefers a specific hotel style: "budget", "luxury", etc., or null
   "request_modifications": {{
     "duration_days": null,        // new duration if changed, otherwise null
     "budget": null,               // new budget amount if changed, otherwise null
@@ -66,53 +68,108 @@ Return a JSON object with:
   "reasoning": "Explanation of what we need to change and why"
 }}
 
-IMPORTANT: If the user wants to shorten or extend the trip, set change_type to "shorten_trip" or "extend_trip" and set request_modifications.duration_days to the new number.
-If the user mentions budget/cost concerns, set appropriate request_modifications.
+IMPORTANT RULES:
+- If the user wants to shorten or extend the trip, set change_type appropriately and set request_modifications.duration_days.
+- If the user prefers a specific transport mode (e.g. "I prefer flights", "take a train instead"), set change_type to "prefer_transport_mode", set transport_preference to the mode, and set re_research_categories to [] (empty — we already have the data, just need to re-plan with the preference).
+- If the user wants to SEARCH for different transport options (e.g. "find cheaper flights"), set re_research_categories to ["transport"].
+- If the user wants a different hotel, set re_research_categories to ["hotels"].
+- If the user wants different activities, set re_research_categories to ["activities"].
+- Only set re_research_categories to ["all"] if the destination, dates, or origin change.
+- If the user mentions budget/cost concerns without changing destination/dates, set re_research_categories to [] (just re-plan with existing data).
 Return ONLY the JSON object."""
 
     try:
         response = await llm.ainvoke(prompt)
-        return json.loads(response.content)
+        content = response.content.strip()
+        # Strip markdown code fences if present
+        if content.startswith("```"):
+            content = content.split("\n", 1)[1] if "\n" in content else content[3:]
+            if content.endswith("```"):
+                content = content[:-3].strip()
+        return json.loads(content)
     except Exception as e:
         logger.error("Change request interpretation failed: %s", e)
         return {
             "affected_days": [],
             "change_type": "other",
-            "needs_re_research": True,
+            "re_research_categories": ["all"],
+            "transport_preference": None,
             "specific_changes": [],
             "reasoning": f"Could not interpret change. Will re-plan from scratch. Error: {str(e)}",
         }
 
 
+# LLM may return plural or synonym forms; normalize to canonical mode values
+_TRANSPORT_MODE_ALIASES: dict[str, str] = {
+    "flight": "flight", "flights": "flight", "air": "flight", "plane": "flight",
+    "train": "train", "trains": "train", "rail": "train", "railway": "train",
+    "bus": "bus", "buses": "bus", "coach": "bus",
+}
+
+
+def _normalize_transport_mode(raw: str | None) -> str | None:
+    if not raw:
+        return None
+    return _TRANSPORT_MODE_ALIASES.get(raw.lower().strip(), raw.lower().strip())
+
+
 def _compute_delta(change_analysis: dict, itinerary: dict) -> dict:
     """Heuristic delta computation — determine minimal re-work needed."""
+    re_research_cats = change_analysis.get("re_research_categories", [])
+    # Backward compat: if LLM returned old-style needs_re_research=True without categories
+    if not re_research_cats and change_analysis.get("needs_re_research"):
+        re_research_cats = ["all"]
+
     delta = {
-        "re_research_needed": change_analysis.get("needs_re_research", False),
+        "re_research_needed": bool(re_research_cats),
+        "re_research_categories": re_research_cats,  # granular: ["transport"], ["hotels"], ["all"], etc.
         "days_to_replan": change_analysis.get("affected_days", []),
         "change_type": change_analysis.get("change_type", "other"),
         "activities_to_remove": [],
         "preferences_to_add": [],
         "hotel_change": False,
         "flight_change": False,
+        "transport_preference": _normalize_transport_mode(change_analysis.get("transport_preference")),
+        "hotel_preference": change_analysis.get("hotel_preference"),
     }
 
     change_type = change_analysis.get("change_type", "")
 
     if change_type == "change_hotel":
         delta["hotel_change"] = True
-        delta["re_research_needed"] = True
+        if "hotels" not in re_research_cats and "all" not in re_research_cats:
+            re_research_cats.append("hotels")
+            delta["re_research_needed"] = True
 
     elif change_type in ("change_flight", "change_transport"):
         delta["flight_change"] = True
-        delta["re_research_needed"] = True
+        if "transport" not in re_research_cats and "all" not in re_research_cats:
+            re_research_cats.append("transport")
+            delta["re_research_needed"] = True
+
+    elif change_type == "prefer_transport_mode":
+        # User just wants a different mode from existing options — no re-research needed
+        delta["flight_change"] = True
+        # Don't force re_research_needed — planner can handle with existing data
 
     elif change_type in ("extend_trip", "shorten_trip"):
+        delta["days_to_replan"] = list(range(1, len(itinerary.get("days", [])) + 1))
+        # Duration change: activities might need refresh, transport/hotel stay the same
+        if not re_research_cats:
+            re_research_cats = ["activities"]
+            delta["re_research_needed"] = True
+
+    elif change_type in ("change_destination"):
+        # Destination change requires everything
+        re_research_cats = ["all"]
         delta["re_research_needed"] = True
         delta["days_to_replan"] = list(range(1, len(itinerary.get("days", [])) + 1))
 
-    elif change_type in ("change_budget", "change_destination"):
-        delta["re_research_needed"] = True
+    elif change_type == "change_budget":
+        # Budget change: just re-plan with existing data
         delta["days_to_replan"] = list(range(1, len(itinerary.get("days", [])) + 1))
+
+    delta["re_research_categories"] = re_research_cats
 
     for change in change_analysis.get("specific_changes", []):
         if change.get("remove"):
@@ -211,16 +268,20 @@ async def replan(state: TripState) -> TripState:
 
     # Signal what needs to happen next (graph routing will use these flags)
     if delta["re_research_needed"]:
+        cats = delta.get("re_research_categories", ["all"])
+        cat_label = ", ".join(cats) if "all" not in cats else "all categories"
         state["research_complete"] = False  # Will trigger re-research
         await sse_manager.emit_phase_update(
             trip_id, "replanning", "re-research",
-            "Changes require fresh research. Re-running searches..."
+            f"Re-searching {cat_label}..."
         )
     else:
         state["planning_complete"] = False  # Will trigger re-planning only
+        pref = delta.get("transport_preference")
+        detail = f" Prioritizing {pref}s." if pref else ""
         await sse_manager.emit_phase_update(
             trip_id, "replanning", "re-plan",
-            "Adjusting the itinerary based on your changes..."
+            f"Adjusting the itinerary based on your changes...{detail}"
         )
 
     return state

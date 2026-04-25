@@ -24,8 +24,8 @@ def generate_mock_flights(
         f"https://www.google.com/travel/flights?q=flights+from+{origin}+to+{destination}"
     )
 
-    # Rough domestic INR price tiers
-    price_base = 3500.0 if currency == "INR" else 50.0
+    # Rough domestic INR round-trip price tiers
+    price_base = 7000.0 if currency == "INR" else 100.0
 
     options = [
         FlightOption(
@@ -35,6 +35,7 @@ def generate_mock_flights(
             departure_time=f"{dep_dt}T06:00:00",
             arrival_time=f"{dep_dt}T08:30:00",
             duration_minutes=150,
+            stops=0,
             from_location=origin,
             to_location=destination,
             price=round(price_base * 0.9, 0),
@@ -48,8 +49,10 @@ def generate_mock_flights(
             mode="flight",
             airline_or_operator="Air India",
             departure_time=f"{dep_dt}T10:15:00",
-            arrival_time=f"{dep_dt}T12:55:00",
-            duration_minutes=160,
+            arrival_time=f"{dep_dt}T14:45:00",
+            duration_minutes=270,
+            stops=1,
+            layover_info="1h 30m in DEL",
             from_location=origin,
             to_location=destination,
             price=round(price_base * 1.1, 0),
@@ -65,6 +68,7 @@ def generate_mock_flights(
             departure_time=f"{dep_dt}T14:30:00",
             arrival_time=f"{dep_dt}T17:00:00",
             duration_minutes=150,
+            stops=0,
             from_location=origin,
             to_location=destination,
             price=round(price_base * 0.8, 0),

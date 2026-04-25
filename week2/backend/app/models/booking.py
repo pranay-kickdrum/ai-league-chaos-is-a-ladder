@@ -19,6 +19,8 @@ class FlightOption(BaseModel):
     departure_time: str = ""
     arrival_time: str = ""
     duration_minutes: int = 0
+    stops: int = 0  # 0 = non-stop
+    layover_info: str = ""  # e.g. "1h 30m in DEL"
     from_location: str = ""
     to_location: str = ""
     price: float = 0.0
@@ -66,6 +68,7 @@ class ActivityOption(BaseModel):
     latitude: Optional[float] = None
     longitude: Optional[float] = None
     rating: float = 0.0
+    price_level: Optional[int] = None  # 0-4 from Google Places (0=free, 4=very expensive)
     place_id: Optional[str] = None
     source: str = ""
     is_verified: bool = False

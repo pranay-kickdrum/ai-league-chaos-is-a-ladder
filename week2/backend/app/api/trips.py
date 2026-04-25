@@ -146,19 +146,23 @@ async def _run_graph(trip_id: str, initial_state: TripState, db: AsyncSession):
                     # If checkpoint reached, pause
                     if node_output.get("awaiting_human"):
                         logger.info("Trip %s paused at checkpoint", trip_id)
-                        # Persist state
+                        # Persist state (including itinerary/budget for export)
                         await update_trip_state(
                             db, trip_id,
                             status=state.get("status", ""),
                             last_checkpoint=state.get("last_checkpoint"),
                             state_json=json.dumps(state, default=str),
+                            itinerary_json=json.dumps(state.get("itinerary", {}), default=str) if state.get("itinerary") else None,
+                            budget_json=json.dumps(state.get("budget_breakdown", {}), default=str) if state.get("budget_breakdown") else None,
                         )
                         return
-        # Graph completed
+        # Graph completed — persist full state + itinerary/budget for export
         await update_trip_state(
             db, trip_id,
             status=state.get("status", ""),
             state_json=json.dumps(state, default=str),
+            itinerary_json=json.dumps(state.get("itinerary", {}), default=str) if state.get("itinerary") else None,
+            budget_json=json.dumps(state.get("budget_breakdown", {}), default=str) if state.get("budget_breakdown") else None,
         )
     except Exception as e:
         logger.exception("Graph execution failed for trip %s", trip_id)

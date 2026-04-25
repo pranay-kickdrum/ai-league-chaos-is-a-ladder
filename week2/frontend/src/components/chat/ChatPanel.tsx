@@ -2,14 +2,17 @@ import { useRef, useEffect, useState, KeyboardEvent } from 'react';
 import { Send } from 'lucide-react';
 import ChatMessage from './ChatMessage';
 import ApprovalCard from './ApprovalCard';
-import type { ChatMessage as ChatMessageType, CheckpointData } from '../../types';
+import type { ChatMessage as ChatMessageType, CheckpointData, ResearchFlight, ResearchHotel } from '../../types';
 
 interface ChatPanelProps {
   messages: ChatMessageType[];
   checkpoint?: CheckpointData;
   onSend: (text: string) => void;
-  onCheckpointAction: (action: string) => void;
+  onCheckpointAction: (action: string, metadata?: Record<string, string>) => void;
   disabled?: boolean;
+  initialPrompt?: string;
+  selectedTransport?: ResearchFlight;
+  selectedHotel?: ResearchHotel;
 }
 
 export default function ChatPanel({
@@ -18,8 +21,11 @@ export default function ChatPanel({
   onSend,
   onCheckpointAction,
   disabled,
+  initialPrompt,
+  selectedTransport,
+  selectedHotel,
 }: ChatPanelProps) {
-  const [input, setInput] = useState('');
+  const [input, setInput] = useState(initialPrompt ?? '');
   const bottomRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -57,6 +63,8 @@ export default function ChatPanel({
           <ApprovalCard
             checkpoint={checkpoint}
             onAction={onCheckpointAction}
+            selectedTransport={selectedTransport}
+            selectedHotel={selectedHotel}
           />
         )}
         <div ref={bottomRef} />

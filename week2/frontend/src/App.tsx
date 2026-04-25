@@ -4,7 +4,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import HomePage from './pages/HomePage';
 import TripPage from './pages/TripPage';
 
-type Page = { name: 'home' } | { name: 'trip'; tripId?: string };
+type Page = { name: 'home' } | { name: 'trip'; tripId?: string; initialPrompt?: string };
 
 export default function App() {
   const [page, setPage] = useState<Page>({ name: 'home' });
@@ -20,11 +20,13 @@ export default function App() {
           <HomePage
             onNewTrip={() => setPage({ name: 'trip' })}
             onLoadTrip={(id) => setPage({ name: 'trip', tripId: id })}
+            onStartWithPrompt={(prompt) => setPage({ name: 'trip', initialPrompt: prompt })}
           />
         )}
         {page.name === 'trip' && (
           <TripPage
             tripId={page.tripId}
+            initialPrompt={page.initialPrompt}
             onBack={() => setPage({ name: 'home' })}
           />
         )}

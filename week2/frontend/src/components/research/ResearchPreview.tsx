@@ -1,11 +1,17 @@
 import { useState } from 'react';
-import { Plane, Hotel, MapPin, Star, ExternalLink, ChevronDown, ChevronUp, Clock, MapPinned, Train, Bus } from 'lucide-react';
+import { Plane, Hotel, MapPin, Star, ExternalLink, ChevronDown, ChevronUp, Clock, MapPinned, Train, Bus, CheckCircle } from 'lucide-react';
 import { formatCurrency } from '../../lib/utils';
 import type { ResearchData, ResearchFlight, ResearchHotel, ResearchActivity } from '../../types';
 
 interface ResearchPreviewProps {
   research: ResearchData;
   currency?: string;
+  selectedTransportId?: string;
+  selectedHotelId?: string;
+  recommendedTransportId?: string;
+  recommendedHotelId?: string;
+  onSelectTransport?: (flight: ResearchFlight) => void;
+  onSelectHotel?: (hotel: ResearchHotel) => void;
 }
 
 function TransportIcon({ mode }: { mode?: string }) {
@@ -14,18 +20,29 @@ function TransportIcon({ mode }: { mode?: string }) {
   return <Plane className="w-3.5 h-3.5 text-ocean" />;
 }
 
-function TransportCard({ f, currency }: { f: ResearchFlight; currency: string }) {
+function TransportCard({ f, currency, isSelected, isRecommended, onSelect }: {
+  f: ResearchFlight; currency: string; isSelected?: boolean; isRecommended?: boolean; onSelect?: () => void;
+}) {
   const [open, setOpen] = useState(false);
+  const selectable = !!onSelect;
   return (
     <div
-      className="bg-slate-50 rounded-lg p-3 cursor-pointer hover:bg-slate-100 transition border border-transparent hover:border-ocean/20"
-      onClick={() => setOpen(!open)}
+      className={`rounded-lg p-3 cursor-pointer transition border-2 ${
+        isSelected
+          ? 'border-ocean bg-ocean/5 ring-1 ring-ocean/20'
+          : 'border-transparent bg-slate-50 hover:bg-slate-100 hover:border-ocean/20'
+      }`}
+      onClick={() => { if (selectable) onSelect(); else setOpen(!open); }}
     >
       <div className="flex items-center justify-between">
         <div>
           <p className="text-sm font-medium text-slate-700 flex items-center gap-1.5">
             <TransportIcon mode={f.mode} />
             {f.airline_or_operator || 'Unknown'}
+            {isRecommended && (
+              <span className="text-[10px] bg-forest/10 text-forest px-1.5 py-0.5 rounded-full font-medium ml-1">Rec.</span>
+            )}
+            {isSelected && <CheckCircle className="w-3.5 h-3.5 text-ocean ml-1" />}
           </p>
           <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5">
             {f.departure_time && <span>{f.departure_time}</span>}
@@ -45,16 +62,25 @@ function TransportCard({ f, currency }: { f: ResearchFlight; currency: string })
             </p>
             {f.source && <span className="text-[10px] text-slate-400">{f.source}</span>}
           </div>
-          {open ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+            className="p-0.5 hover:bg-slate-200 rounded"
+          >
+            {open ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+          </button>
         </div>
       </div>
       {open && (
-        <div className="mt-2.5 pt-2.5 border-t border-slate-200 space-y-1.5 text-xs text-slate-600">
+        <div className="mt-2.5 pt-2.5 border-t border-slate-200 space-y-1.5 text-xs text-slate-600" onClick={(e) => e.stopPropagation()}>
           {f.from_location && f.to_location && (
             <p><span className="text-slate-400">Route:</span> {f.from_location} → {f.to_location}</p>
           )}
           {f.mode && <p><span className="text-slate-400">Mode:</span> {f.mode}</p>}
           {f.class_type && <p><span className="text-slate-400">Class:</span> {f.class_type}</p>}
+          {f.stops !== undefined && f.stops > 0 && f.layover_info && (
+            <p><span className="text-slate-400">Layover:</span> {f.layover_info}</p>
+          )}
           {f.arrival_time && <p><span className="text-slate-400">Arrival:</span> {f.arrival_time}</p>}
           {f.duration_minutes && f.duration_minutes > 0 && (
             <p><span className="text-slate-400">Duration:</span> {Math.floor(f.duration_minutes / 60)}h {f.duration_minutes % 60}m</p>
@@ -76,17 +102,30 @@ function TransportCard({ f, currency }: { f: ResearchFlight; currency: string })
   );
 }
 
-function HotelCard({ h, currency }: { h: ResearchHotel; currency: string }) {
+function HotelCard({ h, currency, isSelected, isRecommended, onSelect }: {
+  h: ResearchHotel; currency: string; isSelected?: boolean; isRecommended?: boolean; onSelect?: () => void;
+}) {
   const [open, setOpen] = useState(false);
   const hasPrice = h.price_per_night > 0;
+  const selectable = !!onSelect;
   return (
     <div
-      className="bg-slate-50 rounded-lg p-3 cursor-pointer hover:bg-slate-100 transition border border-transparent hover:border-ocean/20"
-      onClick={() => setOpen(!open)}
+      className={`rounded-lg p-3 cursor-pointer transition border-2 ${
+        isSelected
+          ? 'border-ocean bg-ocean/5 ring-1 ring-ocean/20'
+          : 'border-transparent bg-slate-50 hover:bg-slate-100 hover:border-ocean/20'
+      }`}
+      onClick={() => { if (selectable) onSelect(); else setOpen(!open); }}
     >
       <div className="flex items-center justify-between">
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-medium text-slate-700 truncate">{h.name}</p>
+          <p className="text-sm font-medium text-slate-700 truncate flex items-center gap-1.5">
+            {h.name}
+            {isRecommended && (
+              <span className="text-[10px] bg-forest/10 text-forest px-1.5 py-0.5 rounded-full font-medium">Rec.</span>
+            )}
+            {isSelected && <CheckCircle className="w-3.5 h-3.5 text-ocean" />}
+          </p>
           <div className="flex items-center gap-2 text-xs text-slate-500 mt-0.5">
             {h.rating ? (
               <span className="flex items-center gap-0.5">
@@ -110,11 +149,17 @@ function HotelCard({ h, currency }: { h: ResearchHotel; currency: string }) {
               <span className="text-xs text-slate-400 italic">Price on site</span>
             )}
           </div>
-          {open ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+          <button
+            type="button"
+            onClick={(e) => { e.stopPropagation(); setOpen(!open); }}
+            className="p-0.5 hover:bg-slate-200 rounded"
+          >
+            {open ? <ChevronUp className="w-3.5 h-3.5 text-slate-400" /> : <ChevronDown className="w-3.5 h-3.5 text-slate-400" />}
+          </button>
         </div>
       </div>
       {open && (
-        <div className="mt-2.5 pt-2.5 border-t border-slate-200 space-y-1.5 text-xs text-slate-600">
+        <div className="mt-2.5 pt-2.5 border-t border-slate-200 space-y-1.5 text-xs text-slate-600" onClick={(e) => e.stopPropagation()}>
           {h.location && (
             <p className="flex items-center gap-1">
               <MapPinned className="w-3 h-3 text-slate-400" /> {h.location}
@@ -228,7 +273,16 @@ function ActivityCard({ a, currency }: { a: ResearchActivity; currency: string }
   );
 }
 
-export default function ResearchPreview({ research, currency = 'INR' }: ResearchPreviewProps) {
+export default function ResearchPreview({
+  research,
+  currency = 'INR',
+  selectedTransportId,
+  selectedHotelId,
+  recommendedTransportId,
+  recommendedHotelId,
+  onSelectTransport,
+  onSelectHotel,
+}: ResearchPreviewProps) {
   const { flights, hotels, activities } = research;
   const trains = research.trains ?? [];
   const buses = research.buses ?? [];
@@ -246,7 +300,14 @@ export default function ResearchPreview({ research, currency = 'INR' }: Research
           </div>
           <div className="space-y-2">
             {flights.slice(0, 5).map((f, i) => (
-              <TransportCard key={i} f={f} currency={currency} />
+              <TransportCard
+                key={f.id || i}
+                f={f}
+                currency={currency}
+                isSelected={!!selectedTransportId && f.id === selectedTransportId}
+                isRecommended={!!recommendedTransportId && f.id === recommendedTransportId}
+                onSelect={onSelectTransport ? () => onSelectTransport(f) : undefined}
+              />
             ))}
           </div>
         </div>
@@ -263,7 +324,14 @@ export default function ResearchPreview({ research, currency = 'INR' }: Research
           </div>
           <div className="space-y-2">
             {trains.slice(0, 5).map((t, i) => (
-              <TransportCard key={i} f={t} currency={currency} />
+              <TransportCard
+                key={t.id || i}
+                f={t}
+                currency={currency}
+                isSelected={!!selectedTransportId && t.id === selectedTransportId}
+                isRecommended={!!recommendedTransportId && t.id === recommendedTransportId}
+                onSelect={onSelectTransport ? () => onSelectTransport(t) : undefined}
+              />
             ))}
           </div>
         </div>
@@ -280,7 +348,14 @@ export default function ResearchPreview({ research, currency = 'INR' }: Research
           </div>
           <div className="space-y-2">
             {buses.slice(0, 5).map((b, i) => (
-              <TransportCard key={i} f={b} currency={currency} />
+              <TransportCard
+                key={b.id || i}
+                f={b}
+                currency={currency}
+                isSelected={!!selectedTransportId && b.id === selectedTransportId}
+                isRecommended={!!recommendedTransportId && b.id === recommendedTransportId}
+                onSelect={onSelectTransport ? () => onSelectTransport(b) : undefined}
+              />
             ))}
           </div>
         </div>
@@ -297,7 +372,14 @@ export default function ResearchPreview({ research, currency = 'INR' }: Research
           </div>
           <div className="space-y-2">
             {hotels.slice(0, 5).map((h, i) => (
-              <HotelCard key={i} h={h} currency={currency} />
+              <HotelCard
+                key={h.id || i}
+                h={h}
+                currency={currency}
+                isSelected={!!selectedHotelId && h.id === selectedHotelId}
+                isRecommended={!!recommendedHotelId && h.id === recommendedHotelId}
+                onSelect={onSelectHotel ? () => onSelectHotel(h) : undefined}
+              />
             ))}
           </div>
         </div>

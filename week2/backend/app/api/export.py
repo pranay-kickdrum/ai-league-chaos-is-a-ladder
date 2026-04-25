@@ -31,12 +31,22 @@ async def export_html(
     if isinstance(itinerary, str):
         itinerary = json.loads(itinerary)
 
+    # Fallback: extract itinerary from state_json if dedicated column is empty
+    if not itinerary and trip.state_json:
+        full_state = json.loads(trip.state_json) if isinstance(trip.state_json, str) else trip.state_json
+        itinerary = full_state.get("itinerary", {})
+
     if not itinerary:
         raise HTTPException(status_code=400, detail="No itinerary to export")
 
     budget = trip.budget_json
     if isinstance(budget, str):
         budget = json.loads(budget)
+
+    # Fallback: extract budget from state_json
+    if not budget and trip.state_json:
+        full_state = json.loads(trip.state_json) if isinstance(trip.state_json, str) else trip.state_json
+        budget = full_state.get("budget_breakdown", {})
 
     request_data = trip.request_json
     if isinstance(request_data, str):
@@ -68,12 +78,22 @@ async def export_pdf(
     if isinstance(itinerary, str):
         itinerary = json.loads(itinerary)
 
+    # Fallback: extract itinerary from state_json if dedicated column is empty
+    if not itinerary and trip.state_json:
+        full_state = json.loads(trip.state_json) if isinstance(trip.state_json, str) else trip.state_json
+        itinerary = full_state.get("itinerary", {})
+
     if not itinerary:
         raise HTTPException(status_code=400, detail="No itinerary to export")
 
     budget = trip.budget_json
     if isinstance(budget, str):
         budget = json.loads(budget)
+
+    # Fallback: extract budget from state_json
+    if not budget and trip.state_json:
+        full_state = json.loads(trip.state_json) if isinstance(trip.state_json, str) else trip.state_json
+        budget = full_state.get("budget_breakdown", {})
 
     request_data = trip.request_json
     if isinstance(request_data, str):
